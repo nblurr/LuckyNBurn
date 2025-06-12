@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IUniswapV4PoolManager} from "v4-core/interfaces/IUniswapV4PoolManager.sol";
-import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {BaseHook} from "v4-core/src/BaseHook.sol";
-import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {BaseHook} from "v4-periphery/utils/BaseHook.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/libraries/BeforeSwapDelta.sol";
-import {ReentrancyGuard} from "solmate/src/utils/ReentrancyGuard.sol";
-import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
+import {ReentrancyGuard} from "solmate/utils/ReentrancyGuard.sol";
+import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
 
 /// @title LuckyNBurnHook
 /// @notice A Uniswap v4 hook that introduces a gamified, multi-tiered fee mechanism.
@@ -58,7 +57,7 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
     /// The key is a hash of the swapper and the pool ID to ensure it's unique per swap.
     mapping(bytes32 => uint16) private _burnFeeBpsForSwap;
 
-    constructor(IUniswapV4PoolManager _poolManager) BaseHook(_poolManager) {
+    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
         owner = msg.sender;
         _setDefaultConfig();
     }

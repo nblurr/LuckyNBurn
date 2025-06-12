@@ -3,14 +3,12 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {LuckyNBurnHook, Config, Tier} from "../src/LuckyNBurnHook.sol";
-import {PoolManagerTest} from "v4-core/test/PoolManagerTest.sol";
-import {IUniswapV4PoolManager} from "v4-core/interfaces/IUniswapV4PoolManager.sol";
-import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {PoolManagerTest} from "v4-core/../test/PoolManager.t.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
-import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/libraries/BeforeSwapDelta.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 
 contract LuckyNBurnHookTest is PoolManagerTest {
     using CurrencyLibrary for Currency;

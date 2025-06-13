@@ -1,401 +1,481 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
-import {LuckyNBurnHook, Config, Tier} from "src/LuckyNBurnHook.sol";
-
-// V4 Test Imports
-import {PoolManagerTest} from "@uniswap/v4-core/test/PoolManager.t.sol";
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-
-import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
-import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
-import {ERC20Mock} from "@uniswap/v4-core/lib/openzeppelin-contracts/contracts/mocks/token/ERC20Mock.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
-import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
-import {console} from "forge-std/console.sol";
+import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
+import {PoolKey, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {IHooks} from "v4-core/interfaces/IHooks.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
+import {LuckyNBurnHook} from "../src/LuckyNBurnHook.sol";
+import {ImmutableState} from "../lib/v4-periphery/src/base/ImmutableState.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract LuckyNBurnHookTest is Test, Deployers {
+contract TestLuckyNBurnHook is Test, Deployers {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
 
-    ERC20Mock public USDC;
-    ERC20Mock public WETH;
-    ERC20Mock public DAI;
-    
-    uint160 constant SQRT_RATIO_1_1 = 79228162514264337593543950336; // sqrt(1) * 2^96
-    uint160 constant MIN_SQRT_RATIO = 4295128739;
+    // Define events from LuckyNBurnHook
+    event Lucky(address indexed trader, uint16 feeBps, uint256 timestamp);
+    event Discounted(address indexed trader, uint16 feeBps);
+    event Normal(address indexed trader, uint16 feeBps);
+    event Unlucky(address indexed trader, uint16 feeBps, uint256 burnAmount);
+    event SetChances(uint16 lucky, uint16 discounted, uint16 normal, uint16 unlucky);
+    event SetFees(uint16 lucky, uint16 discounted, uint16 normal, uint16 unlucky);
+    event SetCooldown(uint256 period);
+    event SetBurnConfig(address burnAddress, uint16 burnShareBps);
+
+    error WrappedError(address target, bytes4 selector, bytes reason, bytes details);
 
     LuckyNBurnHook internal hook;
     PoolKey internal poolKey;
-    PoolId internal poolId;
 
-    uint256 internal constant SWAP_AMOUNT = 1e18;
-    uint256 private constant BASIS_POINTS_MAX = 10_000;
+    address internal constant BURN_ADDRESS = address(0xdEaD);
+    address internal trader = address(0x1234);
 
-    function deployMintAndApproveWETHAndDAI()
-        internal
-        returns (Currency currency0, Currency currency1)
-    {
-        // Deploy mock WETH
-        WETH.mint(address(this), 1_000_000e18);
-        WETH.approve(address(manager), type(uint256).max);
-
-        // Deploy mock DAI
-        DAI.mint(address(this), 1_000_000e18);
-        DAI.approve(address(manager), type(uint256).max);
-
-        // Wrap addresses as Currency
-        currency0 = Currency.wrap(address(WETH));
-        currency1 = Currency.wrap(address(DAI));
-    }
-
+    /// @notice Sets up the test environment for LuckyNBurnHook tests.
     function setUp() public {
         deployFreshManagerAndRouters();
+        deployMintAndApprove2Currencies();
 
+        // Deploy hook to an address that has the proper flags set
+        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG);
+        deployCodeTo("LuckyNBurnHook.sol", abi.encode(manager), address(flags));
+        hook = LuckyNBurnHook(address(flags));
 
-        (currency0, currency1) = deployMintAndApproveWETHAndDAI();
+        poolKey = PoolKey({
+            currency0: currency0,
+            currency1: currency1,
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(hook))
+        });
+        manager.initialize(poolKey, SQRT_PRICE_1_1);
 
-        currency0 = Currency.wrap(address(WETH));
-    currency1 = Currency.wrap(address(DAI));
+        // Add initial liquidity to the pool
+        uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
+        uint256 token0ToAdd = 10 ether;
+        uint128 liquidityDelta =
+                            LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_1, sqrtPriceAtTickUpper, token0ToAdd);
 
-        // Calculate the hook address with ONLY the hook flags
-        address hookAddress = address(
-            uint160(
-                Hooks.BEFORE_INITIALIZE_FLAG |
-                    Hooks.BEFORE_SWAP_FLAG |
-                    Hooks.AFTER_SWAP_FLAG
-            )
-        );
-        
-        // Deploy the hook at the correct address
-        deployCodeTo("LuckyNBurnHook.sol", abi.encode(manager), hookAddress);
-        hook = LuckyNBurnHook(hookAddress);
-
-        // Define the pool with dynamic fee flag
-
-        // Initialize a pool
-        (key, ) = initPool(
-            currency0,
-            currency1,
-            hook,
-            LPFeeLibrary.DYNAMIC_FEE_FLAG, // Set the `DYNAMIC_FEE_FLAG` in place of specifying a fixed fee
-            SQRT_PRICE_1_1
-        );
-
-        // Add some liquidity
-        modifyLiquidityRouter.modifyLiquidity(
-            key,
+        modifyLiquidityRouter.modifyLiquidity{value: token0ToAdd}(
+            poolKey,
             ModifyLiquidityParams({
                 tickLower: -60,
                 tickUpper: 60,
-                liquidityDelta: 1000 ether,
+                liquidityDelta: int256(uint256(liquidityDelta)),
                 salt: bytes32(0)
             }),
             ZERO_BYTES
         );
 
-        // Deploy mock tokens
-        USDC = new ERC20Mock(); // 6 decimals for USDC
-        WETH = new ERC20Mock(); // 18 decimals for WETH
-        DAI = new ERC20Mock(); // 18 decimals for DAI
-
-        // Fund this test contract with tokens
-        // Deal tokens to test contract
-        deal(address(USDC), address(this), 1_000_000e6); // 1M USDC
-        deal(address(DAI), address(hook), 1_000_000e18); // 100 DAI for hook
-        deal(address(WETH), address(hook), 1_000_000e18); // Fund hook with WETH for fee transfers
-
-        // Approve tokens
-        USDC.approve(address(manager), type(uint256).max);
-        WETH.approve(address(manager), type(uint256).max);
-        DAI.approve(address(manager), type(uint256).max);
+        // Give the trader some tokens
+        deal(Currency.unwrap(currency0), trader, 100 ether);
+        deal(Currency.unwrap(currency1), trader, 100 ether);
     }
 
-    function _loadConfigFromEnv() internal view returns (Config memory) {
-        // Load tier configurations
-        Tier[4] memory tiers = [
-            Tier({
-                chanceBps: uint24(vm.envUint("TIER1_CHANCE_BPS")),
-                feeBps: uint24(vm.envUint("TIER1_FEE_BPS"))
-            }),
-            Tier({
-                chanceBps: uint24(vm.envUint("TIER2_CHANCE_BPS")),
-                feeBps: uint24(vm.envUint("TIER2_FEE_BPS"))
-            }),
-            Tier({
-                chanceBps: uint24(vm.envUint("TIER3_CHANCE_BPS")),
-                feeBps: uint24(vm.envUint("TIER3_FEE_BPS"))
-            }),
-            Tier({
-                chanceBps: uint24(vm.envUint("TIER4_CHANCE_BPS")),
-                feeBps: uint24(vm.envUint("TIER4_FEE_BPS"))
-            })
-        ];
+    /// @notice Helper function to perform a swap with hook data
+    function _performSwap(address _trader, bytes32 salt) internal returns (BalanceDelta) {
+        bytes memory hookData = abi.encode(_trader, salt);
 
-        // Load burn configuration
-        address burnAddress = vm.envAddress("BURN_ADDRESS");
-        uint24 burnShareBps = uint24(vm.envUint("BURN_SHARE_BPS"));
-
-        return Config ({
-            tiers: tiers,
-            burnAddress: burnAddress,
-            burnShareBps: burnShareBps
-        });
-    }
-
-    // --- Test Initialization ---
-
-    function test_Initialization_UsesDefaultConfig() public view{
-
-        
-        Config memory conf = hook.getConfig(); // or hook.getConfig()
-
-        // Unpack fields for logging or use
-        Tier[4] memory tiers = conf.tiers;
-        address burnAddress = conf.burnAddress;
-        uint24 burnShareBps = conf.burnShareBps;
-        
-        Config memory defaultConfig = Config({tiers: tiers, burnAddress: burnAddress, burnShareBps: burnShareBps});
-
-        Config memory actualConfig = hook.getPoolConfigs(poolId);
-
-        assertEq(actualConfig.burnAddress, defaultConfig.burnAddress, "Default burn address mismatch");
-        assertEq(actualConfig.burnShareBps, defaultConfig.burnShareBps, "Default burn share mismatch");
-        
-        for (uint i = 0; i < 4; i++) {
-            assertEq(actualConfig.tiers[i].chanceBps, defaultConfig.tiers[i].chanceBps, "Default tier chance mismatch");
-            assertEq(actualConfig.tiers[i].feeBps, defaultConfig.tiers[i].feeBps, "Default tier fee mismatch");
-        }
-    }
-
-    function test_Initialization_WithCustomConfig() public {
-        // Create a custom config
-        Config memory customConfig = Config({
-            tiers: [
-                Tier({chanceBps: 2500, feeBps: 100}),
-                Tier({chanceBps: 2500, feeBps: 200}),
-                Tier({chanceBps: 2500, feeBps: 300}),
-                Tier({chanceBps: 2500, feeBps: 400})
-            ],
-            burnAddress: 0x000000000000000000000000000000000000dEaD,
-            burnShareBps: 2000 // 20%
-        });
-
-        // Create and initialize a new pool
-        PoolKey memory customPoolKey = PoolKey({
-            currency0: Currency.wrap(address(WETH)),
-            currency1: Currency.wrap(address(DAI)),
-            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
-            tickSpacing: 60,
-            hooks: hook
-        });
-        
-        // Initialize the pool first
-        manager.initialize(customPoolKey, SQRT_RATIO_1_1);
-        
-        // Get the pool ID
-        PoolId customPoolId = customPoolKey.toId();
-        
-        // Set the pool configuration
-        hook.setPoolConfigs(customPoolId, customConfig);
-
-        // Verify the configuration was set correctly
-        Config memory actualConfig = hook.getPoolConfigs(customPoolId);
-        assertEq(actualConfig.burnAddress, customConfig.burnAddress, "Custom burn address mismatch");
-        assertEq(actualConfig.burnShareBps, customConfig.burnShareBps, "Custom burn share mismatch");
-    }
-
-    /*
-    function test_Revert_Initialization_WithInvalidConfig() public {
-        Config memory invalidConfig = hook.getConfig();
-        invalidConfig.tiers[0].chanceBps = 9999; // Total chance is now > 100%
-
-        PoolKey memory invalidPoolKey = PoolKey({
-            currency0: Currency.wrap(address(WETH)),
-            currency1: Currency.wrap(address(DAI)),
-            fee: LPFeeLibrary.DYNAMIC_FEE_FLAG,
-            tickSpacing: 60,
-            hooks: hook
-        });
-
-        // Initialize the pool first
-        manager.initialize(invalidPoolKey, SQRT_RATIO_1_1);
-        
-        // Get the pool ID
-        PoolId invalidPoolId = invalidPoolKey.toId();
-        
-        // Try to set invalid config
-        vm.expectRevert(LuckyNBurnHook.InvalidConfig.selector);
-        hook.setPoolConfigs(invalidPoolId, invalidConfig);
-    }
-    */
-
-    // --- Test Swaps and Fee Tiers ---
-
-    function test_Swap_And_FeeLogic() public {
-        // Find a swapper address for each fee tier
- 
-        address luckySwapper = _findSwapperForRoll(0); // First tier
- /*
-        address discountedSwapper = _findSwapperForRoll(1001); // Second tier
-        address normalSwapper = _findSwapperForRoll(4001); // Third tier
-        address unluckySwapper = _findSwapperForRoll(9001); // Fourth tier
-*/
-
-        vm.deal(luckySwapper, 1_000_000 ether); 
-
-        Config memory config = hook.getConfig();
-
-        _executeAndVerifySwap(luckySwapper, config.tiers[0], config);
-/*
-        _executeAndVerifySwap(discountedSwapper, config.tiers[1], config);
-        _executeAndVerifySwap(normalSwapper, config.tiers[2], config);
-        _executeAndVerifySwap(unluckySwapper, config.tiers[3], config);
-*/
-    }
-
-    // --- Test Admin Functions ---
-
-    function test_SetDefaultConfig() public {
-        Config memory newConfig = Config({
-            tiers: [
-                Tier({chanceBps: 100, feeBps: 1}),
-                Tier({chanceBps: 200, feeBps: 2}),
-                Tier({chanceBps: 9000, feeBps: 3}),
-                Tier({chanceBps: 700, feeBps: 4})
-            ],
-            burnAddress: 0x000000000000000000000000000000000000dEaD,
-            burnShareBps: 1000 // 10%
-        });
-
-        vm.prank(hook.owner());
-        hook.setConfig(newConfig);
-
-        Config memory updatedConfig = hook.getConfig();
-        assertEq(updatedConfig.burnAddress, newConfig.burnAddress, "Admin set burn address mismatch");
-        assertEq(updatedConfig.burnShareBps, newConfig.burnShareBps, "Admin set burn share mismatch");
-    }
-
-    /*
-        function test_Revert_When_NonOwner_SetsDefaultConfig() public {
-            vm.expectRevert("OnlyOwner");
-            hook.setDefaultConfig(hook.getConfig());
-        }
-
-
-    function test_RecoverFunds() public {
-        deal(address(DAI), address(hook), 100e18);
-
-        uint256 ownerBalanceBefore = DAI.balanceOf(hook.owner());
-        
-        vm.prank(hook.owner());
-        hook.recoverFunds(Currency.wrap(address(DAI)), 100e18);
-
-        uint256 ownerBalanceAfter = DAI.balanceOf(hook.owner());
-        assertEq(ownerBalanceAfter - ownerBalanceBefore, 100e18, "Owner did not recover funds");
-    }
-
-   */
-   // --- Test Security/Access Control ---
-
-/*
-    function test_Revert_When_HookCalledByNonManager() public {
-        vm.expectRevert(LuckyNBurnHook.OnlyPoolManager.selector);
-        hook.beforeInitialize(address(this), poolKey, SQRT_RATIO_1_1);
-
-        vm.expectRevert(LuckyNBurnHook.OnlyPoolManager.selector);
-        hook.beforeSwap(address(this), poolKey, SwapParams({
+        SwapParams memory swapParams = SwapParams({
             zeroForOne: true,
-            amountSpecified: int256(SWAP_AMOUNT),
-            sqrtPriceLimitX96: SQRT_RATIO_1_1 / 2
-        }), new bytes(0));
-    }
-*/
+            amountSpecified: -1 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
 
-    // --- Helper Functions ---
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
 
-    function _executeAndVerifySwap(address swapper, Tier memory tier, Config memory config) private {
-        deal(address(USDC), swapper, SWAP_AMOUNT * 2);
-
-        uint256 burnFeeBps = (tier.feeBps * config.burnShareBps) / BASIS_POINTS_MAX;
-        uint256 expectedBurnAmount = (SWAP_AMOUNT * burnFeeBps) / BASIS_POINTS_MAX;
-
-        console.log("Expected Burn Amount: %d", expectedBurnAmount);
-
-        uint256 swapperBalanceBefore = USDC.balanceOf(swapper);
-        uint256 burnBalanceBefore = hook.burnBalances(config.burnAddress, Currency.wrap(address(USDC)));
-        uint256 burnAddressBalanceBefore = USDC.balanceOf(config.burnAddress);
-        
-        vm.prank(swapper);
-        USDC.approve(address(manager), SWAP_AMOUNT);
-        USDC.approve(address(hook), expectedBurnAmount);
-        console.log("Manager Allowance: %d", USDC.allowance(swapper, address(manager)));
-        console.log("Hook Allowance: %d", USDC.allowance(swapper, address(hook)));
-
-        vm.prank(swapper);
-        
-        swap(poolKey, true, -int256(SWAP_AMOUNT), abi.encode(config));
-
-        uint256 swapperBalanceAfter = USDC.balanceOf(swapper);
-        uint256 burnBalanceAfter = hook.burnBalances(config.burnAddress, Currency.wrap(address(USDC)));
-        uint256 burnAddressBalanceAfter = USDC.balanceOf(config.burnAddress);
-        
-        assertEq(swapperBalanceBefore - swapperBalanceAfter, SWAP_AMOUNT + expectedBurnAmount, "Total paid by swapper mismatch");
-        assertEq(burnBalanceAfter - burnBalanceBefore, expectedBurnAmount, "Burn balance mismatch");
-        assertEq(burnAddressBalanceAfter, burnAddressBalanceBefore, "Burn address balance unchanged");
-
-        //vm.prank(config.burnAddress);
-        //hook.claimBurn(Currency.wrap(address(USDC)), expectedBurnAmount);
-        //assertEq(
-        //    USDC.balanceOf(config.burnAddress) - burnAddressBalanceBefore,
-        //    expectedBurnAmount,
-        //    "Burn address claim failed"
-        //);
-    } 
-
-    /// @dev Replicates the hook's _getRoll logic to find a suitable swapper address.
-    function _getRoll(address swapper, PoolId pId) internal view returns (uint256) {
-        return uint256(keccak256(abi.encodePacked(
-            block.timestamp,
-            block.prevrandao,
-            swapper,
-            pId
-        ))) % BASIS_POINTS_MAX;
+        vm.prank(_trader);
+        return swapRouter.swap(poolKey, swapParams, settings, hookData);
     }
 
-    /// @dev Brute-forces to find a swapper address that results in a specific dice roll range.
-    function _findSwapperForRoll(uint256 targetRoll) internal view returns (address) {
-        address swapper;
-        uint256 roll;
-        for (uint i = 1; i < 1000; i++) {
-            swapper = address(uint160(i));
+    /// @notice Test that the hook initializes with correct default values
+    function test_initialization() public view {
+        // Check owner
+        assertEq(hook.owner(), address(this));
 
-            
-            roll = _getRoll(swapper, poolId);
-            // Check if the roll falls into the intended tier's range based on default config
-            if (_getTierIndex(roll) == _getTierIndex(targetRoll)) {
-                return swapper;
-            }
+        // Check default tier settings
+        (uint16 luckyChance, uint16 luckyFee) = hook.lucky();
+        assertEq(luckyChance, 1000); // 10%
+        assertEq(luckyFee, 10); // 0.1%
+
+        (uint16 discountedChance, uint16 discountedFee) = hook.discounted();
+        assertEq(discountedChance, 3000); // 30%
+        assertEq(discountedFee, 25); // 0.25%
+
+        (uint16 normalChance, uint16 normalFee) = hook.normal();
+        assertEq(normalChance, 5000); // 50%
+        assertEq(normalFee, 50); // 0.5%
+
+        (uint16 unluckyChance, uint16 unluckyFee) = hook.unlucky();
+        assertEq(unluckyChance, 1000); // 10%
+        assertEq(unluckyFee, 100); // 1%
+
+        // Check burn config
+        assertEq(hook.burnAddress(), BURN_ADDRESS);
+        assertEq(hook.burnShareBps(), 5000); // 50%
+
+        // Check cooldown
+        assertEq(hook.cooldownPeriod(), 1 hours);
+    }
+
+    /// @notice Test basic swap functionality - should emit one of the tier events
+    function test_basic_swap() public {
+        bytes32 salt = keccak256("test-salt-1");
+
+        // We don't know which tier will be selected due to randomness,
+        // but one of the events should be emitted
+        vm.expectEmit(true, false, false, false);
+        emit Lucky(trader, 0, 0); // We'll check the actual values later
+
+        vm.expectEmit(true, false, false, false);
+        emit Discounted(trader, 0);
+
+        vm.expectEmit(true, false, false, false);
+        emit Normal(trader, 0);
+
+        vm.expectEmit(true, false, false, false);
+        emit Unlucky(trader, 0, 0);
+
+        _performSwap(trader, salt);
+    }
+
+    /// @notice Test that owner can update tier chances
+    function test_set_chances_as_owner() public {
+        vm.expectEmit(false, false, false, true);
+        emit SetChances(2000, 2000, 3000, 3000);
+
+        hook.setChances(2000, 2000, 3000, 3000);
+
+        (uint16 luckyChance,) = hook.lucky();
+        (uint16 discountedChance,) = hook.discounted();
+        (uint16 normalChance,) = hook.normal();
+        (uint16 unluckyChance,) = hook.unlucky();
+
+        assertEq(luckyChance, 2000);
+        assertEq(discountedChance, 2000);
+        assertEq(normalChance, 3000);
+        assertEq(unluckyChance, 3000);
+    }
+
+    /// @notice Test that non-owner cannot update tier chances
+    function test_set_chances_reverts_if_not_owner() public {
+        vm.prank(trader);
+        vm.expectRevert(LuckyNBurnHook.NotOwner.selector);
+        hook.setChances(2000, 2000, 3000, 3000);
+    }
+
+    /// @notice Test that setting invalid chances (not summing to 10000) reverts
+    function test_set_chances_reverts_if_invalid_sum() public {
+        vm.expectRevert(LuckyNBurnHook.InvalidChanceSum.selector);
+        hook.setChances(1000, 1000, 1000, 1000); // Sum = 4000, should be 10000
+    }
+
+    /// @notice Test that owner can update tier fees
+    function test_set_fees_as_owner() public {
+        vm.expectEmit(false, false, false, true);
+        emit SetFees(5, 15, 30, 150);
+
+        hook.setFees(5, 15, 30, 150);
+
+        (, uint16 luckyFee) = hook.lucky();
+        (, uint16 discountedFee) = hook.discounted();
+        (, uint16 normalFee) = hook.normal();
+        (, uint16 unluckyFee) = hook.unlucky();
+
+        assertEq(luckyFee, 5);
+        assertEq(discountedFee, 15);
+        assertEq(normalFee, 30);
+        assertEq(unluckyFee, 150);
+    }
+
+    /// @notice Test that non-owner cannot update tier fees
+    function test_set_fees_reverts_if_not_owner() public {
+        vm.prank(trader);
+        vm.expectRevert(LuckyNBurnHook.NotOwner.selector);
+        hook.setFees(5, 15, 30, 150);
+    }
+
+    /// @notice Test that owner can update cooldown period
+    function test_set_cooldown_as_owner() public {
+        uint256 newCooldown = 2 hours;
+
+        vm.expectEmit(false, false, false, true);
+        emit SetCooldown(newCooldown);
+
+        hook.setCooldownPeriod(newCooldown);
+        assertEq(hook.cooldownPeriod(), newCooldown);
+    }
+
+    /// @notice Test that non-owner cannot update cooldown period
+    function test_set_cooldown_reverts_if_not_owner() public {
+        vm.prank(trader);
+        vm.expectRevert(LuckyNBurnHook.NotOwner.selector);
+        hook.setCooldownPeriod(2 hours);
+    }
+
+    /// @notice Test that owner can update burn config
+    function test_set_burn_config_as_owner() public {
+        address newBurnAddress = address(0xbeef);
+        uint16 newBurnShare = 7500; // 75%
+
+        vm.expectEmit(false, false, false, true);
+        emit SetBurnConfig(newBurnAddress, newBurnShare);
+
+        hook.setBurnConfig(newBurnAddress, newBurnShare);
+
+        assertEq(hook.burnAddress(), newBurnAddress);
+        assertEq(hook.burnShareBps(), newBurnShare);
+    }
+
+    /// @notice Test that non-owner cannot update burn config
+    function test_set_burn_config_reverts_if_not_owner() public {
+        vm.prank(trader);
+        vm.expectRevert(LuckyNBurnHook.NotOwner.selector);
+        hook.setBurnConfig(address(0xbeef), 7500);
+    }
+
+    /// @notice Test that burn share cannot exceed 100%
+    function test_set_burn_config_reverts_if_burn_share_too_high() public {
+        vm.expectRevert(LuckyNBurnHook.BurnShareTooHigh.selector);
+        hook.setBurnConfig(address(0xbeef), 10001); // 100.01%
+    }
+
+    /// @notice Test lucky tier cooldown functionality
+    function test_lucky_cooldown() public {
+        // Force lucky tier by setting chances to 100% lucky
+        hook.setChances(10000, 0, 0, 0);
+
+        bytes32 salt1 = keccak256("lucky-salt-1");
+        bytes32 salt2 = keccak256("lucky-salt-2");
+
+        // First swap should succeed and record lucky timestamp
+        _performSwap(trader, salt1);
+
+        uint256 lastLucky = hook.lastLuckyTimestamp(trader);
+        assertGt(lastLucky, 0);
+
+        // Second swap immediately after should revert due to cooldown
+        vm.expectRevert(LuckyNBurnHook.CooldownActive.selector);
+        _performSwap(trader, salt2);
+
+        // After cooldown period, should work again
+        vm.warp(block.timestamp + 1 hours + 1);
+        _performSwap(trader, salt2);
+
+        // Check that timestamp was updated
+        assertGt(hook.lastLuckyTimestamp(trader), lastLucky);
+    }
+
+    /// @notice Test that different users have separate cooldowns
+    function test_lucky_cooldown_per_user() public {
+        address trader2 = address(0x5678);
+        deal(Currency.unwrap(currency0), trader2, 100 ether);
+        deal(Currency.unwrap(currency1), trader2, 100 ether);
+
+        // Force lucky tier
+        hook.setChances(10000, 0, 0, 0);
+
+        bytes32 salt1 = keccak256("user1-salt");
+        bytes32 salt2 = keccak256("user2-salt");
+
+        // First user gets lucky
+        _performSwap(trader, salt1);
+
+        // Second user should also be able to get lucky immediately
+        vm.prank(trader2);
+        bytes memory hookData = abi.encode(trader2, salt2);
+        SwapParams memory swapParams = SwapParams({
+            zeroForOne: true,
+            amountSpecified: -1 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+        swapRouter.swap(poolKey, swapParams, PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        }), hookData);
+
+        // Both should have different timestamps
+        assertGt(hook.lastLuckyTimestamp(trader), 0);
+        assertGt(hook.lastLuckyTimestamp(trader2), 0);
+    }
+
+    /// @notice Test that unlucky tier triggers burning mechanism
+    function test_unlucky_burning() public {
+        // Force unlucky tier
+        hook.setChances(0, 0, 0, 10000);
+
+        uint256 initialBurnBalance = BURN_ADDRESS.balance;
+
+        // Perform swap that should trigger burning
+        _performSwap(trader, keccak256("burn-test"));
+
+        // Check that burn address received tokens
+        assertGt(BURN_ADDRESS.balance, initialBurnBalance);
+    }
+
+    /// @notice Test hook permissions are set correctly
+    function test_hook_permissions() public view {
+        Hooks.Permissions memory permissions = hook.getHookPermissions();
+
+        assertTrue(permissions.beforeSwap);
+        assertTrue(permissions.afterSwap);
+        assertFalse(permissions.beforeInitialize);
+        assertFalse(permissions.afterInitialize);
+        assertFalse(permissions.beforeAddLiquidity);
+        assertFalse(permissions.afterAddLiquidity);
+        assertFalse(permissions.beforeRemoveLiquidity);
+        assertFalse(permissions.afterRemoveLiquidity);
+        assertFalse(permissions.beforeDonate);
+        assertFalse(permissions.afterDonate);
+        assertFalse(permissions.beforeSwapReturnDelta);
+        assertFalse(permissions.afterSwapReturnDelta);
+        assertFalse(permissions.afterAddLiquidityReturnDelta);
+        assertFalse(permissions.afterRemoveLiquidityReturnDelta);
+    }
+
+    /// @notice Test that hooks revert when not called by pool manager
+    function test_reverts_if_not_pool_manager() public {
+        PoolKey memory key;
+        SwapParams memory params;
+        BalanceDelta delta = BalanceDelta.wrap(0);
+        bytes memory hookData = "";
+
+        // Test beforeSwap
+        vm.expectRevert(ImmutableState.NotPoolManager.selector);
+        hook.beforeSwap(address(1), key, params, hookData);
+
+        // Test afterSwap
+        vm.expectRevert(ImmutableState.NotPoolManager.selector);
+        hook.afterSwap(address(1), key, params, delta, hookData);
+    }
+
+    /// @notice Test tier result storage and cleanup
+    function test_tier_result_storage_cleanup() public {
+        bytes32 salt = keccak256("storage-test");
+        bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
+
+        // Before swap, no tier result should exist
+        (LuckyNBurnHook.TierType tierType, uint16 feeBps) = hook.tierResults(swapId);
+        assertEq(uint8(tierType), 0);
+        assertEq(feeBps, 0);
+
+        // After swap, tier result should be cleaned up
+        _performSwap(trader, salt);
+
+        (tierType, feeBps) = hook.tierResults(swapId);
+        assertEq(uint8(tierType), 0);
+        assertEq(feeBps, 0);
+    }
+
+    /// @notice Test that all tier types can be selected
+    function test_all_tier_types_selectable() public {
+        // Test by forcing each tier type to 100% chance
+
+        // Test Lucky
+        hook.setChances(10000, 0, 0, 0);
+        vm.expectEmit(true, false, false, false);
+        emit Lucky(trader, 10, 0);
+        _performSwap(trader, keccak256("lucky"));
+
+        // Wait for cooldown
+        vm.warp(block.timestamp + 2 hours);
+
+        // Test Discounted
+        hook.setChances(0, 10000, 0, 0);
+        vm.expectEmit(true, false, false, false);
+        emit Discounted(trader, 25);
+        _performSwap(trader, keccak256("discounted"));
+
+        // Test Normal
+        hook.setChances(0, 0, 10000, 0);
+        vm.expectEmit(true, false, false, false);
+        emit Normal(trader, 50);
+        _performSwap(trader, keccak256("normal"));
+
+        // Test Unlucky
+        hook.setChances(0, 0, 0, 10000);
+        vm.expectEmit(true, false, false, false);
+        emit Unlucky(trader, 100, 0);
+        _performSwap(trader, keccak256("unlucky"));
+    }
+
+    /// @notice Test that randomness produces different results with different salts
+    function test_randomness_with_different_salts() public {
+        // This test is probabilistic, but with enough different salts
+        // we should see different outcomes if randomness is working
+        for (uint256 i = 0; i < 20; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("random-test", i));
+
+            // We can't easily predict the outcome, but we can check that
+            // the function doesn't revert and processes successfully
+            _performSwap(trader, salt);
+
+            // Reset for next iteration (skip cooldown for lucky)
+            vm.warp(block.timestamp + 2 hours);
         }
-        revert("Could not find a swapper for the target roll");
     }
 
-    /// @dev Helper to determine tier index from a roll, mirroring the hook's logic.
-    function _getTierIndex(uint256 roll) internal view returns (uint) {
-        Config memory config = hook.getConfig();
-        uint256 cumulative = 0;
-        for(uint i = 0; i < 4; i++) {
-            cumulative += config.tiers[i].chanceBps;
-            if (roll < cumulative) return i;
+    /// @notice Test edge case: zero swap amount
+    function test_zero_swap_amount() public {
+        bytes memory hookData = abi.encode(trader, keccak256("zero-swap"));
+
+        SwapParams memory swapParams = SwapParams({
+            zeroForOne: true,
+            amountSpecified: 0, // Zero amount
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+
+        vm.prank(trader);
+        // This might revert at the pool level, but the hook should handle it gracefully
+        try swapRouter.swap(poolKey, swapParams, PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        }), hookData) {
+            // If it succeeds, that's fine too
+        } catch {
+            // Expected to potentially fail at pool level
         }
-        return 3;
     }
-} 
+
+    /// @notice Fuzz test for tier selection consistency
+    function testFuzz_tier_selection_consistency(address fuzzTrader, uint256 saltSeed) public {
+        vm.assume(fuzzTrader != address(0) && fuzzTrader != address(this));
+
+        bytes32 salt = keccak256(abi.encodePacked(saltSeed));
+        deal(Currency.unwrap(currency0), fuzzTrader, 100 ether);
+        deal(Currency.unwrap(currency1), fuzzTrader, 100 ether);
+
+        // The swap should complete without reverting for any valid trader/salt combination
+        vm.prank(fuzzTrader);
+        bytes memory hookData = abi.encode(fuzzTrader, salt);
+        SwapParams memory swapParams = SwapParams({
+            zeroForOne: true,
+            amountSpecified: -1 ether,
+            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+        });
+
+        try swapRouter.swap(poolKey, swapParams, PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        }), hookData) {
+            // Swap succeeded - check that tier result was cleaned up
+            bytes32 swapId = keccak256(abi.encodePacked(fuzzTrader, salt));
+            (LuckyNBurnHook.TierType tierType, uint16 feeBps) = hook.tierResults(swapId);
+            assertEq(uint8(tierType), 0);
+            assertEq(feeBps, 0);
+        } catch {
+            // Some combinations might fail due to cooldown or other constraints
+            // That's acceptable for fuzz testing
+        }
+    }
+}

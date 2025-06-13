@@ -1,335 +1,394 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
-
-import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
-import {IPoolManager, SwapParams} from "v4-periphery/lib/v4-core/src/interfaces/IPoolManager.sol";
-import {PoolKey} from "v4-periphery/lib/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "v4-periphery/lib/v4-core/src/types/PoolId.sol";
-import {Currency, CurrencyLibrary} from "v4-periphery/lib/v4-core/src/types/Currency.sol";
-import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-periphery/lib/v4-core/src/types/BeforeSwapDelta.sol";
-import {Hooks} from "v4-periphery/lib/v4-core/src/libraries/Hooks.sol";
-import {LPFeeLibrary} from "v4-periphery/lib/v4-core/src/libraries/LPFeeLibrary.sol";
-import {ReentrancyGuard} from "solmate/src/utils/ReentrancyGuard.sol";
-import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
-import {IERC20} from "v4-periphery/lib/v4-core/lib/forge-std/src/interfaces/IERC20.sol";
-import {BalanceDelta, BalanceDeltaLibrary} from "v4-periphery/lib/v4-core/src/types/BalanceDelta.sol";
-import {console} from "forge-std/console.sol";
-// --- Data Structures ---
-
-struct Tier {
-    uint24 chanceBps; // Chance for this tier, in basis points
-    uint24 feeBps;    // Total fee for this tier, in basis points
-}
-
-struct Config {
-    Tier[4] tiers;
-    address burnAddress;
-    uint24 burnShareBps; // Share of the total fee that gets burned, in basis points
-}
+pragma solidity ^0.8.26;
 
 /// @title LuckyNBurnHook
-/// @notice A Uniswap v4 hook that introduces a gamified, multi-tiered fee mechanism.
-/// @dev For each swap, a fee tier is randomly selected, overriding the pool's default fee.
-/// A portion of this fee is directed to LPs, and the remaining portion is burned.
-contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
-    using CurrencyLibrary for Currency;
-    using PoolIdLibrary for PoolKey;
-    using SafeTransferLib for address;
-    using LPFeeLibrary for uint24;
+/// @notice A gamified Uniswap v4 hook that implements variable swap fees with different tiers
+/// @dev This hook introduces a gamification layer to swaps with different fee tiers:
+/// - Lucky: Lowest fees with cooldown period
+/// - Discounted: Reduced fees
+/// - Normal: Standard fees
+/// - Unlucky: Highest fees with a portion burned
 
-    uint256 private constant BASIS_POINTS_MAX = 10_000;
+import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-    // --- Errors ---
+/// @title LuckyNBurnHook - A gamified Uniswap v4 hook with variable swap fees
+/**
+ * @title LuckyNBurnHook
+ * @notice A Uniswap v4 hook that implements a gamified fee structure with different tiers
+ * @dev Inherits from BaseHook and implements the required hook functions for swap operations
+ */
+contract LuckyNBurnHook is BaseHook {
+    // -------------------------------------------------------------------
+    //                              ERRORS
+    // -------------------------------------------------------------------
 
-    error InvalidConfig();
-    error CooldownNotElapsed();
-    error OnlyPoolManager();
-    error InsufficientBurnBalance();
+    /// @notice Thrown when a function is called by an address that is not the owner
     error NotOwner();
-    error InvalidAmount();
 
-    address public owner;
-    mapping(PoolId => Config) internal poolConfigs; // Ensure public, no custom getter
+    /// @notice Thrown when the sum of tier chances does not equal 10,000 basis points (100%)
+    error InvalidChanceSum();
 
-    /// @notice The default configuration for new pools if no custom config is provided.
-    Config public defaultConfig;
+    /// @notice Thrown when a user attempts to get lucky again before the cooldown period has passed
+    error CooldownActive();
 
-    /// @dev This mapping stores the fee that needs to be burned for a given swap.
-    /// It's populated in `beforeSwap` and consumed in `afterSwap`.
-    /// The key is a hash of the swapper and the pool ID to ensure it's unique per swap.
-    mapping(bytes32 => uint24) private _burnFeeBpsForSwap;
+    /// @notice Thrown when the burn share is set higher than 100% (10,000 basis points)
+    error BurnShareTooHigh();
 
-    error MustUseDynamicFee();
+    // -------------------------------------------------------------------
+    //                              EVENTS
+    // -------------------------------------------------------------------
 
-    // Initialize BaseHook parent contract in the constructor
-    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
-        owner = msg.sender;
+    /// @notice Emitted when the chances for each tier are updated
+    event SetChances(uint16 lucky, uint16 discounted, uint16 normal, uint16 unlucky);
+
+    /// @notice Emitted when the fees for each tier are updated
+    event SetFees(uint16 lucky, uint16 discounted, uint16 normal, uint16 unlucky);
+
+    /// @notice Emitted when the cooldown period is updated
+    event SetCooldown(uint256 period);
+
+    /// @notice Emitted when the burn configuration is updated
+    event SetBurnConfig(address burnAddress, uint16 burnShareBps);
+
+    /// @notice Emitted when a user gets the lucky tier
+    event Lucky(address indexed trader, uint16 feeBps, uint256 timestamp);
+
+    /// @notice Emitted when a user gets the discounted tier
+    event Discounted(address indexed trader, uint16 feeBps);
+
+    /// @notice Emitted when a user gets the normal tier
+    event Normal(address indexed trader, uint16 feeBps);
+
+    /// @notice Emitted when a user gets the unlucky tier (includes burn amount)
+    event Unlucky(address indexed trader, uint16 feeBps, uint256 burnAmount);
+
+    // -------------------------------------------------------------------
+    //                             STRUCTS & ENUMS
+    // -------------------------------------------------------------------
+
+    /**
+     * @notice Defines a fee tier with its chance and fee rate
+     * @member chanceBps The chance of this tier being selected (in basis points)
+     * @member feeBps The fee rate for this tier (in basis points)
+     */
+    struct Tier {
+        uint16 chanceBps;
+        uint16 feeBps;
     }
 
-    function getConfig() public view returns (Config memory) {
-        return defaultConfig;
+    /**
+     * @notice Enumerates the possible tier types
+     */
+    enum TierType {
+        Lucky,      // Lowest fees with cooldown
+        Discounted, // Reduced fees
+        Normal,     // Standard fees
+        Unlucky     // Highest fees with burn
     }
 
-    function getDefaultConfig() public pure returns (Config memory) {
-        return Config({
-            tiers: [
-                Tier({chanceBps: 1000, feeBps: 10}),
-                Tier({chanceBps: 3000, feeBps: 25}),
-                Tier({chanceBps: 5000, feeBps: 50}),
-                Tier({chanceBps: 1000, feeBps: 100})
-            ],
-            burnAddress: 0x000000000000000000000000000000000000dEaD,
-            burnShareBps: 5000
-        });
-    } 
-
-    /// @notice Returns the hook permissions required by this contract.
-    /// @dev This hook requires callbacks before initialization and before/after swaps.
-    function getHookPermissions()
-        public
-        pure
-        override
-        returns (Hooks.Permissions memory)
-    {
-        return
-            Hooks.Permissions({
-                beforeInitialize: true,
-                afterInitialize: false,
-                beforeAddLiquidity: false,
-                beforeRemoveLiquidity: false,
-                afterAddLiquidity: false,
-                afterRemoveLiquidity: false,
-                beforeSwap: true,
-                afterSwap: true,
-                beforeDonate: false,
-                afterDonate: false,
-                beforeSwapReturnDelta: false,
-                afterSwapReturnDelta: false,
-                afterAddLiquidityReturnDelta: false,
-                afterRemoveLiquidityReturnDelta: false
-            });
+    /**
+     * @notice Stores the result of a tier selection
+     * @member tierType The type of tier selected
+     * @member feeBps The fee rate for the selected tier (in basis points)
+     */
+    struct TierResult {
+        TierType tierType;
+        uint16 feeBps;
     }
 
-    function _beforeInitialize(
-        address,
-        PoolKey calldata key,
-        uint160
-    ) internal override returns (bytes4) {
-        if (msg.sender != address(poolManager)) revert NotPoolManager();
+    // -------------------------------------------------------------------
+    //                            MODIFIERS
+    // -------------------------------------------------------------------
 
-        // Use default config if no custom config is provided
-        Config memory config = getDefaultConfig();
-        
-        // Validate config
-        if (config.burnAddress == address(0)) revert InvalidConfig();
-        if (config.burnShareBps == 0 || config.burnShareBps > BASIS_POINTS_MAX) revert InvalidConfig();
-        if (config.tiers.length == 0) revert InvalidConfig();
-
-        // Validate tiers
-        for (uint256 i = 0; i < config.tiers.length; i++) {
-            if (config.tiers[i].feeBps == 0 || config.tiers[i].feeBps > BASIS_POINTS_MAX) revert InvalidConfig();
-            if (i > 0 && config.tiers[i].feeBps <= config.tiers[i - 1].feeBps) revert InvalidConfig();
-        }
-        
-        setPoolConfigs(key.toId(), config);
-        return this.beforeInitialize.selector;
-    }
-
-    function getPoolConfigs(PoolId poolId) public view returns (Config memory) {
-        return poolConfigs[poolId];
-    }
-
-    function setPoolConfigs(PoolId poolId, Config memory config) public returns (Config memory) {
-        // Copy each tier individually to avoid the memory to storage copy issue
-        for (uint i = 0; i < 4; i++) {
-            poolConfigs[poolId].tiers[i] = config.tiers[i];
-        }
-        poolConfigs[poolId].burnAddress = config.burnAddress;
-        poolConfigs[poolId].burnShareBps = config.burnShareBps;
-        return config;
-    }
-
-    /// @notice The hook called before a swap.
-    /// @dev It determines the fee tier for the swap, calculates the LP and burn portions,
-    /// and returns the LP fee to the pool manager.
-    function _beforeSwap(
-        address,
-        PoolKey calldata key,
-        SwapParams calldata,
-        bytes calldata
-    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        if (msg.sender != address(poolManager)) revert NotPoolManager();
-
-        PoolId poolId = key.toId();
-        Config memory config = getPoolConfigs(poolId);
-
-        // 1. Get the dice roll
-        uint256 roll = _getRoll(msg.sender, poolId);
-
-        // 2. Determine the fee tier
-        Tier memory selectedTier = _getTier(config, roll);
-        uint24 totalFeeBps = selectedTier.feeBps;
-
-        // 3. Calculate LP fee and burn fee
-        uint24 burnFeeBps = (totalFeeBps * config.burnShareBps) / uint24(BASIS_POINTS_MAX);
-        uint24 lpFeeBps = totalFeeBps - burnFeeBps;
-
-        // 4. Store the burn fee for afterSwap to collect
-        bytes32 swapId = keccak256(abi.encodePacked(msg.sender, poolId));
-        _burnFeeBpsForSwap[swapId] = burnFeeBps;
-
-        uint24 lpFeeBpsWithFlag = lpFeeBps | LPFeeLibrary.OVERRIDE_FEE_FLAG;
-
-        // 5. Return the dynamic LP fee to the PoolManager
-        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeBpsWithFlag);
-    }
-
-
-
-    
-
-    function _afterSwap(
-        address swapper,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        BalanceDelta,
-        bytes calldata
-    ) internal override returns (bytes4, int128) {
-        if (msg.sender != address(poolManager)) revert OnlyPoolManager();
-
-        PoolId poolId = key.toId();
-        bytes32 swapId = keccak256(abi.encodePacked(swapper, poolId));
-        uint24 burnFeeBps = _burnFeeBpsForSwap[swapId];
-        delete _burnFeeBpsForSwap[swapId];
-
-        if (burnFeeBps == 0) {
-            return (this.afterSwap.selector, 0);
-        }
-
-        Config storage config = poolConfigs[poolId];
-        Currency currencyToTake = params.zeroForOne ? key.currency0 : key.currency1;
-        uint256 burnAmount = (uint256(params.amountSpecified < 0 ? -params.amountSpecified : params.amountSpecified) * burnFeeBps) / BASIS_POINTS_MAX;
-
-        int128 hookDelta = 0;
-
-        if (burnAmount > 0) {
-            console.log("AfterSwap: Burn Amount: %d, Currency: %s", burnAmount, Currency.unwrap(currencyToTake));
-            burnBalances[config.burnAddress][currencyToTake] += burnAmount;
-            address token = Currency.unwrap(currencyToTake);
-            IERC20(token).transferFrom(msg.sender, config.burnAddress, burnAmount);
-        }
-
-        return (this.afterSwap.selector, hookDelta);
-}
-
-function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
-    if (msg.sender != address(poolManager)) revert OnlyPoolManager();
-
-    (PoolKey memory key, SwapParams memory params, uint256 burnAmount) =
-        abi.decode(rawData, (PoolKey, SwapParams, uint256));
-
-    Config storage config = poolConfigs[key.toId()];
-    Currency currencyToTake = params.zeroForOne ? key.currency0 : key.currency1;
-
-    if (burnAmount > 0) {
-        console.log("UnlockCallback: Burn Amount: %d, Currency: %s", burnAmount, Currency.unwrap(currencyToTake));
-        burnBalances[config.burnAddress][currencyToTake] += burnAmount;
-        // Take tokens to burn address
-        poolManager.take(currencyToTake, config.burnAddress, burnAmount);
-        // Settle to finalize the transfer
-        poolManager.settle();
-    }
-
-    return new bytes(0);
-}
-
-    // --- Internal & Helper Functions ---
-
-    /// @dev Establishes the initial default configuration on deployment.
-
-    function setDefaultConfig() public {
-        // Set each tier individually
-        defaultConfig.tiers[0] = Tier({chanceBps: 1000, feeBps: 10});
-        defaultConfig.tiers[1] = Tier({chanceBps: 3000, feeBps: 25});
-        defaultConfig.tiers[2] = Tier({chanceBps: 5000, feeBps: 50});
-        defaultConfig.tiers[3] = Tier({chanceBps: 1000, feeBps: 100});
-        defaultConfig.burnAddress = 0x000000000000000000000000000000000000dEaD;
-        defaultConfig.burnShareBps = 5000;
-        _validateConfig(defaultConfig);
-    }
-
-    function setConfig(Config memory newConfig) public {
-        // Copy each tier individually to avoid the memory to storage copy issue
-        for (uint i = 0; i < 4; i++) {
-            defaultConfig.tiers[i] = newConfig.tiers[i];
-        }
-        defaultConfig.burnAddress = newConfig.burnAddress;
-        defaultConfig.burnShareBps = newConfig.burnShareBps;
-        _validateConfig(defaultConfig);
-    }
-
-    /// @dev Generates a pseudo-random number for the dice roll.
-    function _getRoll(address swapper, PoolId poolId) internal view returns (uint256) {
-        return uint256(keccak256(abi.encodePacked(
-            block.timestamp,
-            block.prevrandao,
-            swapper,
-            poolId
-        ))) % BASIS_POINTS_MAX;
-    }
-
-    /// @dev Selects a fee tier based on the dice roll.
-    function _getTier(Config memory config, uint256 roll) internal pure returns (Tier memory) {
-        uint256 cumulativeChance = 0;
-        for (uint i = 0; i < config.tiers.length; i++) {
-            cumulativeChance += config.tiers[i].chanceBps;
-            if (roll < cumulativeChance) {
-                return config.tiers[i];
-            }
-        }
-        // Fallback to the last tier in case of rounding errors (should not happen if config is valid)
-        return config.tiers[config.tiers.length - 1];
-    }
-    
-    /// @dev Validates that the sum of chances in a config is 100%.
-    function _validateConfig(Config memory config) internal pure {
-        uint256 totalChanceBps = 0;
-        for (uint i = 0; i < config.tiers.length; i++) {
-            totalChanceBps += config.tiers[i].chanceBps;
-        }
-        if (totalChanceBps != BASIS_POINTS_MAX) revert InvalidConfig();
-        if (config.burnShareBps > BASIS_POINTS_MAX) revert InvalidConfig();
-    }
-
-
-    // --- Admin Functions ---
-
-    /// @notice Allows the owner to withdraw any tokens accidentally sent to this contract.
-    /*function recoverFunds(Currency currency, uint256 amount) external {
-        if (msg.sender != owner) revert NotOwner();
-        if (amount == 0) revert InvalidAmount();
-
-        address token = Currency.unwrap(currency);
-        IERC20(token).transferFrom(hook, msg.sender, burnAmount);
-    }
-
-    // Added claimBurn function
-    /*
-     function claimBurn(Currency currency, uint256 amount) external {
-        if (burnBalances[burnAddress][currency] < amount) revert InsufficientBurnBalance();
-        
-        burnBalances[burnAddress][currency] -= amount;
-        address token = Currency.unwrap(currency);
-         IERC20(token).transferFrom(burnAddress, msg.sender, burnAmount);
-        
-    }*/
-
-
-    /// @dev This mapping stores the balances that can be claimed by the burn address.
-    mapping(address => mapping(Currency => uint256)) public burnBalances;
-
+    /**
+     * @notice Restricts function access to the contract owner
+     */
     modifier onlyOwner() {
-        if (msg.sender != owner) revert("OnlyOwner");
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
-} 
+
+    // -------------------------------------------------------------------
+    //                             STORAGE
+    // -------------------------------------------------------------------
+
+    /// @notice The owner of the contract with administrative privileges
+    address public immutable owner;
+
+    // Fee tiers configuration
+    Tier public lucky;      // Lowest fee tier with cooldown
+    Tier public discounted; // Reduced fee tier
+    Tier public normal;     // Standard fee tier
+    Tier public unlucky;    // Highest fee tier with burn
+
+    /// @notice The address where burned tokens are sent
+    address public burnAddress;
+
+    /// @notice The percentage of fees to burn (in basis points)
+    uint16 public burnShareBps;
+
+    /// @notice The cooldown period between lucky rewards for a single address
+    uint256 public cooldownPeriod = 1 hours;
+
+    /// @notice Tracks the last timestamp an address received a lucky reward
+    mapping(address => uint256) public lastLuckyTimestamp;
+
+    /// @notice Stores the tier results for each swap by swap ID
+    mapping(bytes32 => TierResult) public tierResults;
+
+    // -------------------------------------------------------------------
+    //                          CONSTRUCTOR
+    // -------------------------------------------------------------------
+
+    /**
+     * @notice Initializes the LuckyNBurnHook contract
+     * @param _poolManager The address of the Uniswap v4 PoolManager
+     * @dev Sets up initial fee tiers and burn configuration
+     */
+    constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
+        owner = msg.sender;
+
+        // Initialize fee tiers (chanceBps, feeBps)
+        lucky = Tier(1000, 10);      // 10% chance, 0.1% fee
+        discounted = Tier(3000, 25);  // 30% chance, 0.25% fee
+        normal = Tier(5000, 50);      // 50% chance, 0.5% fee
+        unlucky = Tier(1000, 100);    // 10% chance, 1% fee
+
+        // Default burn configuration
+        burnAddress = 0x000000000000000000000000000000000000dEaD; // Burn address
+        burnShareBps = 5000; // 50% of fees are burned for unlucky swaps
+    }
+
+    // -------------------------------------------------------------------
+    //                          PERMISSIONS
+    // -------------------------------------------------------------------
+
+    /**
+     * @notice Returns the hook permissions required by this contract
+     * @return permissions The hook permissions configuration
+     * @dev This hook implements beforeSwap and afterSwap callbacks
+     */
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory permissions) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: false,
+            beforeAddLiquidity: false,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: true,
+            afterSwap: true,
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: false,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
+    }
+
+    // -------------------------------------------------------------------
+    //                          TIER SELECTION
+    // -------------------------------------------------------------------
+
+    /**
+     * @notice Generates a pseudo-random roll for fee tier selection
+     * @param trader The address of the trader
+     * @param salt A unique salt for the swap
+     * @return A random number between 0 and 9,999 (inclusive)
+     * @dev Uses block.timestamp and blockhash for randomness (not suitable for production)
+     */
+    function _getRoll(address trader, bytes32 salt) internal view returns (uint16) {
+        return uint16(uint256(keccak256(abi.encodePacked(
+            trader,
+            salt,
+            block.timestamp,
+            blockhash(block.number - 1)
+        ))) % 10_000);
+    }
+
+    /**
+     * @notice Selects a fee tier based on a random roll
+     * @param roll A random number between 0 and 9,999
+     * @return The selected tier type and its corresponding fee
+     * @dev Uses cumulative probability to select the appropriate tier
+     */
+    function _selectTier(uint16 roll) internal view returns (TierType, uint16) {
+        uint16 cumulative = 0;
+        if (roll < (cumulative += lucky.chanceBps)) {
+            return (TierType.Lucky, lucky.feeBps);
+        } else if (roll < (cumulative += discounted.chanceBps)) {
+            return (TierType.Discounted, discounted.feeBps);
+        } else if (roll < (cumulative += normal.chanceBps)) {
+            return (TierType.Normal, normal.feeBps);
+        } else {
+            return (TierType.Unlucky, unlucky.feeBps);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    //                          HOOK IMPLEMENTATION
+    // -------------------------------------------------------------------
+
+    /**
+     * @notice Hook called before a swap executes
+     * @param hookData Encoded trader and salt for tier selection
+     * @return selector The function selector for the afterSwap hook
+     * @return delta The before swap delta (empty)
+     * @return fee The dynamic fee for this swap
+     * @dev Selects a random tier for the swap and stores the result
+     */
+    function _beforeSwap(
+        address,
+        PoolKey calldata,
+        SwapParams calldata,
+        bytes calldata hookData
+    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
+        (address trader, bytes32 salt) = abi.decode(hookData, (address, bytes32));
+        uint16 roll = _getRoll(trader, salt);
+        (TierType tier, uint16 feeBps) = _selectTier(roll);
+        tierResults[keccak256(abi.encodePacked(trader, salt))] = TierResult(tier, feeBps);
+
+        // Return empty BeforeSwapDelta and dynamic fee
+        return (BaseHook.afterSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, feeBps);
+    }
+
+    /**
+     * @notice Hook called after a swap executes to process fees and rewards
+     * @param key The pool key
+     * @param params Swap parameters
+     * @param delta The balance delta from the swap
+     * @param hookData Encoded trader and salt for tier lookup
+     * @return selector The function selector
+     * @return deltaReturn The delta to return to the pool
+     * @dev Processes fees, burns tokens for unlucky swaps, and applies cooldowns
+     */
+    function _afterSwap(
+        address,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata hookData
+    ) internal override returns (bytes4, int128) {
+        (address trader, bytes32 salt) = abi.decode(hookData, (address, bytes32));
+        bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
+        TierResult memory result = tierResults[swapId];
+
+        // Calculate the input amount from the swap delta
+        uint256 amountIn = params.zeroForOne
+            ? uint256(int256(-delta.amount0()))
+            : uint256(int256(-delta.amount1()));
+
+        // Determine which currency to use for fee calculation
+        Currency feeCurrency = params.zeroForOne ? key.currency0 : key.currency1;
+
+        // Process based on the selected tier
+        if (result.tierType == TierType.Unlucky) {
+            // Calculate and burn a portion of the fees for unlucky swaps
+            uint256 totalFee = (amountIn * result.feeBps) / 10_000;
+            uint256 burnAmount = (totalFee * burnShareBps) / 10_000;
+
+            if (burnAmount > 0) {
+                // Take the burn amount from the pool to this contract
+                poolManager.take(feeCurrency, address(this), burnAmount);
+
+                // If it's an ERC20 token, transfer to burn address
+                if (!feeCurrency.isAddressZero()) {
+                    IERC20(Currency.unwrap(feeCurrency)).transfer(burnAddress, burnAmount);
+                } else {
+                    // Handle native ETH case
+                    (bool success, ) = burnAddress.call{value: burnAmount}("");
+                    require(success, "ETH transfer failed");
+                }
+
+                // Settle the taken amount with the pool manager
+                poolManager.settle();
+            }
+
+            emit Unlucky(trader, result.feeBps, burnAmount);
+        } else if (result.tierType == TierType.Lucky) {
+            // Enforce cooldown period for lucky rewards
+            if (block.timestamp < lastLuckyTimestamp[trader] + cooldownPeriod) {
+                revert CooldownActive();
+            }
+            lastLuckyTimestamp[trader] = block.timestamp;
+            emit Lucky(trader, result.feeBps, block.timestamp);
+        } else if (result.tierType == TierType.Discounted) {
+            emit Discounted(trader, result.feeBps);
+        } else {
+            emit Normal(trader, result.feeBps);
+        }
+
+        // Clean up storage
+        delete tierResults[swapId];
+        return (BaseHook.afterSwap.selector, 0);
+    }
+
+    // -------------------------------------------------------------------
+    //                          ADMIN FUNCTIONS
+    // -------------------------------------------------------------------
+    /**
+     * @notice Updates the chance distribution for each tier
+     * @param luckyBps Chance for lucky tier (in basis points)
+     * @param discountedBps Chance for discounted tier (in basis points)
+     * @param normalBps Chance for normal tier (in basis points)
+     * @param unluckyBps Chance for unlucky tier (in basis points)
+     * @dev The sum of all chances must equal 10,000 (100%)
+     */
+    function setChances(
+        uint16 luckyBps,
+        uint16 discountedBps,
+        uint16 normalBps,
+        uint16 unluckyBps
+    ) external onlyOwner {
+        if (luckyBps + discountedBps + normalBps + unluckyBps != 10_000) {
+            revert InvalidChanceSum();
+        }
+        lucky.chanceBps = luckyBps;
+        discounted.chanceBps = discountedBps;
+        normal.chanceBps = normalBps;
+        unlucky.chanceBps = unluckyBps;
+        emit SetChances(luckyBps, discountedBps, normalBps, unluckyBps);
+    }
+
+    /**
+     * @notice Updates the fee rates for each tier
+     * @param luckyFee Fee for lucky tier (in basis points)
+     * @param discountedFee Fee for discounted tier (in basis points)
+     * @param normalFee Fee for normal tier (in basis points)
+     * @param unluckyFee Fee for unlucky tier (in basis points)
+     */
+    function setFees(
+        uint16 luckyFee,
+        uint16 discountedFee,
+        uint16 normalFee,
+        uint16 unluckyFee
+    ) external onlyOwner {
+        lucky.feeBps = luckyFee;
+        discounted.feeBps = discountedFee;
+        normal.feeBps = normalFee;
+        unlucky.feeBps = unluckyFee;
+        emit SetFees(luckyFee, discountedFee, normalFee, unluckyFee);
+    }
+
+    function setCooldownPeriod(uint256 period) external onlyOwner {
+        cooldownPeriod = period;
+        emit SetCooldown(period);
+    }
+
+    function setBurnConfig(address _burnAddress, uint16 _burnShareBps) external onlyOwner {
+        if (_burnShareBps > 10_000) revert BurnShareTooHigh();
+        burnAddress = _burnAddress;
+        burnShareBps = _burnShareBps;
+        emit SetBurnConfig(_burnAddress, _burnShareBps);
+    }
+}

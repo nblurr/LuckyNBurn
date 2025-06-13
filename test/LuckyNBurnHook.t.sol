@@ -77,6 +77,12 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Give the trader some tokens
         deal(Currency.unwrap(currency0), trader, 100 ether);
         deal(Currency.unwrap(currency1), trader, 100 ether);
+
+        // Approve the swap router to spend trader's tokens
+        vm.startPrank(trader);
+        IERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
+        IERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
+        vm.stopPrank();
     }
 
     /// @notice Helper function to perform a swap with hook data
@@ -132,21 +138,15 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_basic_swap() public {
         bytes32 salt = keccak256("test-salt-1");
 
-        // We don't know which tier will be selected due to randomness,
-        // but one of the events should be emitted
-        vm.expectEmit(true, false, false, false);
-        emit Lucky(trader, 0, 0); // We'll check the actual values later
-
-        vm.expectEmit(true, false, false, false);
-        emit Discounted(trader, 0);
-
-        vm.expectEmit(true, false, false, false);
-        emit Normal(trader, 0);
-
-        vm.expectEmit(true, false, false, false);
-        emit Unlucky(trader, 0, 0);
-
+        // Just perform the swap and verify it doesn't revert
+        // The specific tier is random, so we can't predict which event will be emitted
         _performSwap(trader, salt);
+
+        // Verify that tier result was cleaned up (shows the hook executed properly)
+        bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
+        (LuckyNBurnHook.TierType tierType, uint16 feeBps) = hook.tierResults(swapId);
+        assertEq(uint8(tierType), 0);
+        assertEq(feeBps, 0);
     }
 
     /// @notice Test that owner can update tier chances
@@ -381,31 +381,33 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_all_tier_types_selectable() public {
         // Test by forcing each tier type to 100% chance
 
-        // Test Lucky
+        // Test Lucky - first ensure no cooldown is active
+        uint256 currentTime = block.timestamp;
+
         hook.setChances(10000, 0, 0, 0);
-        vm.expectEmit(true, false, false, false);
-        emit Lucky(trader, 10, 0);
+        vm.expectEmit(true, true, false, true);
+        emit Lucky(trader, 10, currentTime);
         _performSwap(trader, keccak256("lucky"));
 
-        // Wait for cooldown
-        vm.warp(block.timestamp + 2 hours);
+        // Wait for cooldown to pass
+        vm.warp(currentTime + 2 hours);
 
         // Test Discounted
         hook.setChances(0, 10000, 0, 0);
-        vm.expectEmit(true, false, false, false);
+        vm.expectEmit(true, true, false, false);
         emit Discounted(trader, 25);
         _performSwap(trader, keccak256("discounted"));
 
         // Test Normal
         hook.setChances(0, 0, 10000, 0);
-        vm.expectEmit(true, false, false, false);
+        vm.expectEmit(true, true, false, false);
         emit Normal(trader, 50);
         _performSwap(trader, keccak256("normal"));
 
         // Test Unlucky
         hook.setChances(0, 0, 0, 10000);
-        vm.expectEmit(true, false, false, false);
-        emit Unlucky(trader, 100, 0);
+        vm.expectEmit(true, true, false, true);
+        emit Unlucky(trader, 100, 0); // burnAmount will be calculated
         _performSwap(trader, keccak256("unlucky"));
     }
 
@@ -413,6 +415,9 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_randomness_with_different_salts() public {
         // This test is probabilistic, but with enough different salts
         // we should see different outcomes if randomness is working
+        bool seenDifferentOutcomes = false;
+        uint8 firstOutcome = 255; // Invalid initial value
+
         for (uint256 i = 0; i < 20; i++) {
             bytes32 salt = keccak256(abi.encodePacked("random-test", i));
 

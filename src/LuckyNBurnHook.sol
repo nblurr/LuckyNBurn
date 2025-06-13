@@ -186,11 +186,11 @@ contract LuckyNBurnHook is BaseHook {
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: true,
+            afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: false,
+            afterSwapReturnDelta: true,
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
@@ -242,7 +242,7 @@ contract LuckyNBurnHook is BaseHook {
     /**
      * @notice Hook called before a swap executes
      * @param hookData Encoded trader and salt for tier selection
-     * @return selector The function selector for the afterSwap hook
+     * @return selector The function selector for the beforeSwap hook
      * @return delta The before swap delta (empty)
      * @return fee The dynamic fee for this swap
      * @dev Selects a random tier for the swap and stores the result
@@ -258,8 +258,8 @@ contract LuckyNBurnHook is BaseHook {
         (TierType tier, uint16 feeBps) = _selectTier(roll);
         tierResults[keccak256(abi.encodePacked(trader, salt))] = TierResult(tier, feeBps);
 
-        // Return empty BeforeSwapDelta and dynamic fee
-        return (BaseHook.afterSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, feeBps);
+        // Return the correct selector for beforeSwap
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, feeBps);
     }
 
     /**
@@ -283,40 +283,22 @@ contract LuckyNBurnHook is BaseHook {
         bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
         TierResult memory result = tierResults[swapId];
 
-        // Calculate the input amount from the swap delta
-        uint256 amountIn = params.zeroForOne
-            ? uint256(int256(-delta.amount0()))
-            : uint256(int256(-delta.amount1()));
+        int128 deltaReturn = 0;
 
-        // Determine which currency to use for fee calculation
-        Currency feeCurrency = params.zeroForOne ? key.currency0 : key.currency1;
-
-        // Process based on the selected tier
         if (result.tierType == TierType.Unlucky) {
-            // Calculate and burn a portion of the fees for unlucky swaps
+            uint256 amountIn = params.zeroForOne
+                ? uint256(int256(-delta.amount0()))
+                : uint256(int256(-delta.amount1()));
+
             uint256 totalFee = (amountIn * result.feeBps) / 10_000;
             uint256 burnAmount = (totalFee * burnShareBps) / 10_000;
 
-            if (burnAmount > 0) {
-                // Take the burn amount from the pool to this contract
-                poolManager.take(feeCurrency, address(this), burnAmount);
-
-                // If it's an ERC20 token, transfer to burn address
-                if (!feeCurrency.isAddressZero()) {
-                    IERC20(Currency.unwrap(feeCurrency)).transfer(burnAddress, burnAmount);
-                } else {
-                    // Handle native ETH case
-                    (bool success, ) = burnAddress.call{value: burnAmount}("");
-                    require(success, "ETH transfer failed");
-                }
-
-                // Settle the taken amount with the pool manager
-                poolManager.settle();
-            }
+            // Return a delta that reduces the user's output by the burn amount
+            // This effectively "burns" the tokens by never giving them to the user
+            deltaReturn = params.zeroForOne ? int128(uint128(burnAmount)) : -int128(uint128(burnAmount));
 
             emit Unlucky(trader, result.feeBps, burnAmount);
         } else if (result.tierType == TierType.Lucky) {
-            // Enforce cooldown period for lucky rewards
             if (block.timestamp < lastLuckyTimestamp[trader] + cooldownPeriod) {
                 revert CooldownActive();
             }
@@ -328,9 +310,8 @@ contract LuckyNBurnHook is BaseHook {
             emit Normal(trader, result.feeBps);
         }
 
-        // Clean up storage
         delete tierResults[swapId];
-        return (BaseHook.afterSwap.selector, 0);
+        return (BaseHook.afterSwap.selector, deltaReturn);
     }
 
     // -------------------------------------------------------------------

@@ -216,7 +216,7 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
             console.log("AfterSwap: Burn Amount: %d, Currency: %s", burnAmount, Currency.unwrap(currencyToTake));
             burnBalances[config.burnAddress][currencyToTake] += burnAmount;
             address token = Currency.unwrap(currencyToTake);
-            IERC20(token).transferFrom(swapper, config.burnAddress, burnAmount);
+            IERC20(token).transferFrom(msg.sender, config.burnAddress, burnAmount);
         }
 
         return (this.afterSwap.selector, hookDelta);

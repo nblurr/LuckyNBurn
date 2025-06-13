@@ -333,12 +333,6 @@ contract LuckyNBurnHookTest is Test, Deployers {
         uint256 swapperBalanceBefore = USDC.balanceOf(swapper);
         uint256 burnBalanceBefore = hook.burnBalances(config.burnAddress, Currency.wrap(address(USDC)));
         uint256 burnAddressBalanceBefore = USDC.balanceOf(config.burnAddress);
-
-        SwapParams memory params = SwapParams({
-            zeroForOne: true,
-            amountSpecified: int256(SWAP_AMOUNT),
-            sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
-        });
         
         vm.prank(swapper);
         USDC.approve(address(manager), SWAP_AMOUNT);

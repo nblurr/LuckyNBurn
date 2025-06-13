@@ -12,8 +12,8 @@ import {LPFeeLibrary} from "v4-periphery/lib/v4-core/src/libraries/LPFeeLibrary.
 import {ReentrancyGuard} from "solmate/src/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solmate/src/utils/SafeTransferLib.sol";
 import {IERC20} from "v4-periphery/lib/v4-core/lib/forge-std/src/interfaces/IERC20.sol";
-
-
+import {BalanceDelta, BalanceDeltaLibrary} from "v4-periphery/lib/v4-core/src/types/BalanceDelta.sol";
+import {console} from "forge-std/console.sol";
 // --- Data Structures ---
 
 struct Tier {
@@ -44,8 +44,9 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
     error InvalidConfig();
     error CooldownNotElapsed();
     error OnlyPoolManager();
-
-    // --- State ---
+    error InsufficientBurnBalance();
+    error NotOwner();
+    error InvalidAmount();
 
     address public owner;
     mapping(PoolId => Config) internal poolConfigs; // Ensure public, no custom getter
@@ -60,6 +61,7 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
 
     error MustUseDynamicFee();
 
+    // Initialize BaseHook parent contract in the constructor
     constructor(IPoolManager _poolManager) BaseHook(_poolManager) {
         owner = msg.sender;
     }
@@ -68,7 +70,7 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
         return defaultConfig;
     }
 
-    function getDefaultConfig() public view returns (Config memory) {
+    function getDefaultConfig() public pure returns (Config memory) {
         return Config({
             tiers: [
                 Tier({chanceBps: 1000, feeBps: 10}),
@@ -108,25 +110,28 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
             });
     }
 
-    /// @notice Hook called by the PoolManager when a pool with this hook is initialized.
-    /// @dev This function sets up the fee configuration for the new pool.
-    /// @param key The PoolKey of the new pool.
-    /// @param hookData Custom configuration data. If empty, the contract's default config is used.
-    function _beforeInitialize(address sender, PoolKey calldata key, uint160 sqrtPriceX96, bytes calldata hookData) external returns (bytes4) {
-        if (!key.fee.isDynamicFee()) revert MustUseDynamicFee();
+    function _beforeInitialize(
+        address,
+        PoolKey calldata key,
+        uint160
+    ) internal override returns (bytes4) {
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
 
-        if (msg.sender != address(poolManager)) revert OnlyPoolManager();
+        // Use default config if no custom config is provided
+        Config memory config = getDefaultConfig();
         
-        PoolId poolId = key.toId();
+        // Validate config
+        if (config.burnAddress == address(0)) revert InvalidConfig();
+        if (config.burnShareBps == 0 || config.burnShareBps > BASIS_POINTS_MAX) revert InvalidConfig();
+        if (config.tiers.length == 0) revert InvalidConfig();
 
-/*
-        if (hookData.length > 0) {
-            Config memory customConfig = abi.decode(hookData, (Config));
-            _validateConfig(customConfig);
-        } else {
- */
-            setPoolConfigs(poolId, getDefaultConfig());
-        //}
+        // Validate tiers
+        for (uint256 i = 0; i < config.tiers.length; i++) {
+            if (config.tiers[i].feeBps == 0 || config.tiers[i].feeBps > BASIS_POINTS_MAX) revert InvalidConfig();
+            if (i > 0 && config.tiers[i].feeBps <= config.tiers[i - 1].feeBps) revert InvalidConfig();
+        }
+        
+        setPoolConfigs(key.toId(), config);
         return this.beforeInitialize.selector;
     }
 
@@ -151,9 +156,9 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
         address,
         PoolKey calldata key,
         SwapParams calldata,
-        bytes calldata _hookData
+        bytes calldata
     ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        if (msg.sender != address(poolManager)) revert OnlyPoolManager();
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
 
         PoolId poolId = key.toId();
         Config memory config = getPoolConfigs(poolId);
@@ -179,42 +184,64 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, lpFeeBpsWithFlag);
     }
 
-    /// @notice The hook called after a swap.
-    /// @dev It takes the pre-calculated burn fee from the swapper and sends it to the burn address.
-    function afterSwap(
-        address sender,
+
+
+    
+
+    function _afterSwap(
+        address swapper,
         PoolKey calldata key,
         SwapParams calldata params,
-        BeforeSwapDelta _delta,
-        bytes calldata _hookData
-     ) internal returns (bytes4, int128) {
+        BalanceDelta,
+        bytes calldata
+    ) internal override returns (bytes4, int128) {
         if (msg.sender != address(poolManager)) revert OnlyPoolManager();
 
         PoolId poolId = key.toId();
-        bytes32 swapId = keccak256(abi.encodePacked(sender, poolId));
+        bytes32 swapId = keccak256(abi.encodePacked(swapper, poolId));
         uint24 burnFeeBps = _burnFeeBpsForSwap[swapId];
-
-        // Cleanup the storage slot
         delete _burnFeeBpsForSwap[swapId];
 
-        if (burnFeeBps > 0) {
-            Config memory config = getPoolConfigs(poolId);
-            Currency currencyToTake = params.zeroForOne ? key.currency0 : key.currency1;
-            
-            uint256 amountSpecified = uint256(params.amountSpecified < 0 ? -params.amountSpecified : params.amountSpecified);
-            uint256 burnAmount = (amountSpecified * burnFeeBps) / BASIS_POINTS_MAX;
-
-            if (burnAmount > 0) {
-                poolManager.take(currencyToTake, sender, burnAmount);
-
-                if (burnAmount > 0) {
-                    poolManager.take(currencyToTake, config.burnAddress, burnAmount);
-                }
-            }
+        if (burnFeeBps == 0) {
+            return (this.afterSwap.selector, 0);
         }
 
-        return (this.afterSwap.selector, 0);
+        Config storage config = poolConfigs[poolId];
+        Currency currencyToTake = params.zeroForOne ? key.currency0 : key.currency1;
+        uint256 burnAmount = (uint256(params.amountSpecified < 0 ? -params.amountSpecified : params.amountSpecified) * burnFeeBps) / BASIS_POINTS_MAX;
+
+        int128 hookDelta = 0;
+
+        if (burnAmount > 0) {
+            console.log("AfterSwap: Burn Amount: %d, Currency: %s", burnAmount, Currency.unwrap(currencyToTake));
+            burnBalances[config.burnAddress][currencyToTake] += burnAmount;
+            address token = Currency.unwrap(currencyToTake);
+            IERC20(token).transferFrom(swapper, config.burnAddress, burnAmount);
+        }
+
+        return (this.afterSwap.selector, hookDelta);
+}
+
+function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
+    if (msg.sender != address(poolManager)) revert OnlyPoolManager();
+
+    (PoolKey memory key, SwapParams memory params, uint256 burnAmount) =
+        abi.decode(rawData, (PoolKey, SwapParams, uint256));
+
+    Config storage config = poolConfigs[key.toId()];
+    Currency currencyToTake = params.zeroForOne ? key.currency0 : key.currency1;
+
+    if (burnAmount > 0) {
+        console.log("UnlockCallback: Burn Amount: %d, Currency: %s", burnAmount, Currency.unwrap(currencyToTake));
+        burnBalances[config.burnAddress][currencyToTake] += burnAmount;
+        // Take tokens to burn address
+        poolManager.take(currencyToTake, config.burnAddress, burnAmount);
+        // Settle to finalize the transfer
+        poolManager.settle();
     }
+
+    return new bytes(0);
+}
 
     // --- Internal & Helper Functions ---
 
@@ -278,9 +305,28 @@ contract LuckyNBurnHook is BaseHook, ReentrancyGuard {
     // --- Admin Functions ---
 
     /// @notice Allows the owner to withdraw any tokens accidentally sent to this contract.
-    function recoverFunds(Currency currency, uint256 amount) external onlyOwner {
-        poolManager.take(currency, owner, amount);
+    /*function recoverFunds(Currency currency, uint256 amount) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (amount == 0) revert InvalidAmount();
+
+        address token = Currency.unwrap(currency);
+        IERC20(token).transferFrom(hook, msg.sender, burnAmount);
     }
+
+    // Added claimBurn function
+    /*
+     function claimBurn(Currency currency, uint256 amount) external {
+        if (burnBalances[burnAddress][currency] < amount) revert InsufficientBurnBalance();
+        
+        burnBalances[burnAddress][currency] -= amount;
+        address token = Currency.unwrap(currency);
+         IERC20(token).transferFrom(burnAddress, msg.sender, burnAmount);
+        
+    }*/
+
+
+    /// @dev This mapping stores the balances that can be claimed by the burn address.
+    mapping(address => mapping(Currency => uint256)) public burnBalances;
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert("OnlyOwner");

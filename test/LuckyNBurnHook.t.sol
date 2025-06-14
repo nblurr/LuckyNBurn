@@ -9,6 +9,7 @@ import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolKey, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
@@ -43,23 +44,29 @@ contract TestLuckyNBurnHook is Test, Deployers {
     address internal trader = address(0x1234);
 
     /// @notice Sets up the test environment for LuckyNBurnHook tests.
+/// @notice Sets up the test environment for LuckyNBurnHook tests.
     function setUp() public {
+        // Deploy fresh manager and routers
         deployFreshManagerAndRouters();
+
+        // Deploy and mint test tokens
         deployMintAndApprove2Currencies();
 
-        // Calculate the flags we need for the hook (BEFORE_SWAP | AFTER_SWAP_RETURN_DELTA)
+        // Calculate the flags we need for the hook
+        // IMPORTANT: You need AFTER_SWAP_FLAG to use AFTER_SWAP_RETURNS_DELTA_FLAG
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG |
+            Hooks.AFTER_SWAP_FLAG |
             Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
 
-        // Deploy the hook to an address with the right flags
-        deployCodeTo(
-            "LuckyNBurnHook.sol:LuckyNBurnHook",
-            abi.encode(manager),
-            address(flags)
+        (address hookAddress, bytes32 salt) = HookMiner.find(
+            address(this),
+            flags,
+            type(LuckyNBurnHook).creationCode,
+            abi.encode(manager)
         );
-        hook = LuckyNBurnHook(address(flags));
+        hook = new LuckyNBurnHook{salt: salt}(manager);
 
         poolKey = PoolKey({
             currency0: currency0,
@@ -73,13 +80,12 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Add initial liquidity to the pool
         uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
         uint256 token0ToAdd = 10 ether;
-        uint128 liquidityDelta =
-                            LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_1, sqrtPriceAtTickUpper, token0ToAdd);
+        uint128 liquidityDelta = LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_1, sqrtPriceAtTickUpper, token0ToAdd);
 
         modifyLiquidityRouter.modifyLiquidity{value: token0ToAdd}(
             poolKey,
             ModifyLiquidityParams({
-                tickLower: - 60,
+                tickLower: -60,
                 tickUpper: 60,
                 liquidityDelta: int256(uint256(liquidityDelta)),
                 salt: bytes32(0)
@@ -97,7 +103,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
         IERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
         vm.stopPrank();
     }
-
     /// @notice Helper function to perform a swap with hook data
     function _performSwap(address _trader, bytes32 salt) internal returns (BalanceDelta) {
         bytes memory hookData = abi.encode(_trader, salt);

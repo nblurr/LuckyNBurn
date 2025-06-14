@@ -4,5 +4,5 @@
 
 # Foundry artifacts
 cache
-lib
 out
+/lib/

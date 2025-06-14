@@ -7,5 +7,3 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
-extra_output = ["abi"]
-extra_output_files = ["abi"]

@@ -15,11 +15,12 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
-import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console} from "forge-std/console.sol";
+import {SwapParams} from "v4-core/types/PoolOperation.sol";
+
 /// @title LuckyNBurnHook - A gamified Uniswap v4 hook with variable swap fees
 /**
  * @title LuckyNBurnHook

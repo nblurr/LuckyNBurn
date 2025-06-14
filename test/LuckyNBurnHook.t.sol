@@ -276,6 +276,9 @@ contract TestLuckyNBurnHook is Test, Deployers {
         bytes32 salt1 = keccak256("lucky-salt-1");
         bytes32 salt2 = keccak256("lucky-salt-2");
 
+        // Ensure no existing cooldown by warping forward enough
+        vm.warp(block.timestamp + 2 hours);
+
         // First swap should succeed and record lucky timestamp
         _performSwap(trader, salt1);
 
@@ -300,11 +303,20 @@ contract TestLuckyNBurnHook is Test, Deployers {
         deal(Currency.unwrap(currency0), trader2, 100 ether);
         deal(Currency.unwrap(currency1), trader2, 100 ether);
 
+        // Approve for trader2
+        vm.startPrank(trader2);
+        IERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
+        IERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
+        vm.stopPrank();
+
         // Force lucky tier
         hook.setChances(10000, 0, 0, 0);
 
         bytes32 salt1 = keccak256("user1-salt");
         bytes32 salt2 = keccak256("user2-salt");
+
+        // Ensure no existing cooldown by warping forward enough
+        vm.warp(block.timestamp + 2 hours);
 
         // First user gets lucky
         _performSwap(trader, salt1);

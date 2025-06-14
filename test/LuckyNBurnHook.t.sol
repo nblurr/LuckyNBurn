@@ -360,7 +360,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertFalse(permissions.beforeDonate);
         assertFalse(permissions.afterDonate);
         assertFalse(permissions.beforeSwapReturnDelta);
-        assertFalse(permissions.afterSwapReturnDelta);
+        assertTrue(permissions.afterSwapReturnDelta);
         assertFalse(permissions.afterAddLiquidityReturnDelta);
         assertFalse(permissions.afterRemoveLiquidityReturnDelta);
     }

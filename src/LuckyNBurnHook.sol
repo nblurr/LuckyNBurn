@@ -7,7 +7,7 @@ pragma solidity ^0.8.26;
 /// - Lucky: Lowest fees with cooldown period
 /// - Discounted: Reduced fees
 /// - Normal: Standard fees
-/// - Unlucky: Highest fees with a portion burned
+/// - Unlucky: Highest fees with a portion collected for burning
 
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -72,6 +72,9 @@ contract LuckyNBurnHook is BaseHook {
     /// @notice Emitted when a user gets the unlucky tier (includes burn amount)
     event Unlucky(address indexed trader, uint16 feeBps, uint256 burnAmount);
 
+    /// @notice Emitted when collected tokens are burned
+    event TokensBurned(Currency indexed currency, uint256 amount);
+
     // -------------------------------------------------------------------
     //                             STRUCTS & ENUMS
     // -------------------------------------------------------------------
@@ -124,7 +127,6 @@ contract LuckyNBurnHook is BaseHook {
 
     /// @notice The owner of the contract with administrative privileges
     address public immutable owner;
-    mapping(address => mapping(Currency => uint256)) public burnBalances;
 
     // Fee tiers configuration
     Tier public lucky;      // Lowest fee tier with cooldown
@@ -147,6 +149,9 @@ contract LuckyNBurnHook is BaseHook {
     /// @notice Stores the tier results for each swap by swap ID
     mapping(bytes32 => TierResult) public tierResults;
 
+    /// @notice Tracks tokens collected for burning
+    mapping(Currency => uint256) public collectedForBurning;
+
     // -------------------------------------------------------------------
     //                          CONSTRUCTOR
     // -------------------------------------------------------------------
@@ -167,7 +172,7 @@ contract LuckyNBurnHook is BaseHook {
 
         // Default burn configuration
         burnAddress = 0x000000000000000000000000000000000000dEaD; // Burn address
-        burnShareBps = 5000; // 50% of fees are burned for unlucky swaps
+        burnShareBps = 5000; // 50% of fees are collected for burning for unlucky swaps
     }
 
     // -------------------------------------------------------------------
@@ -177,7 +182,7 @@ contract LuckyNBurnHook is BaseHook {
     /**
      * @notice Returns the hook permissions required by this contract
      * @return permissions The hook permissions configuration
-     * @dev This hook implements beforeSwap and afterSwap callbacks
+     * @dev This hook implements beforeSwap and afterSwap callbacks with return delta
      */
     function getHookPermissions() public pure override returns (Hooks.Permissions memory permissions) {
         return Hooks.Permissions({
@@ -192,7 +197,7 @@ contract LuckyNBurnHook is BaseHook {
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: true,  // Using return delta for burning
+            afterSwapReturnDelta: true,  // Using return delta for fee collection
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
@@ -266,16 +271,17 @@ contract LuckyNBurnHook is BaseHook {
 
     /**
      * @notice Hook called after a swap executes to process fees and rewards
+     * @param key The pool key
      * @param params Swap parameters
      * @param delta The balance delta from the swap
      * @param hookData Encoded trader and salt for tier lookup
      * @return selector The function selector
      * @return deltaReturn The delta to return to the pool
-     * @dev Processes fees, burns tokens for unlucky swaps, and applies cooldowns
+     * @dev Processes fees, collects tokens for burning for unlucky swaps, and applies cooldowns
      */
     function _afterSwap(
         address,
-        PoolKey calldata,
+        PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
         bytes calldata hookData
@@ -295,15 +301,24 @@ contract LuckyNBurnHook is BaseHook {
             uint256 totalFee = (amountIn * result.feeBps) / 10_000;
             uint256 burnAmount = (totalFee * burnShareBps) / 10_000;
 
-            // Return negative delta to reduce output amount (effectively burning)
             if (burnAmount > 0) {
+                // Determine which currency to collect for burning (the output currency)
+                Currency burnCurrency = params.zeroForOne ? key.currency1 : key.currency0;
+
+                // Track collected tokens for burning
+                collectedForBurning[burnCurrency] += burnAmount;
+
                 emit Unlucky(trader, result.feeBps, burnAmount);
-                // Convert burnAmount to negative int128 and return
-                // The delta is applied to the output token (token1 for zeroForOne, token0 otherwise)
+
+                // Clean up storage
+                delete tierResults[swapId];
+
+                // Return negative delta - hook collects these tokens
                 return (BaseHook.afterSwap.selector, -int128(int256(burnAmount)));
             }
 
             emit Unlucky(trader, result.feeBps, 0);
+
         } else if (result.tierType == TierType.Lucky) {
             // Enforce cooldown period for lucky rewards
             if (block.timestamp < lastLuckyTimestamp[trader] + cooldownPeriod) {
@@ -323,6 +338,23 @@ contract LuckyNBurnHook is BaseHook {
         return (BaseHook.afterSwap.selector, 0);
     }
 
+    // -------------------------------------------------------------------
+    //                          BURN FUNCTIONS
+    // -------------------------------------------------------------------
+
+    /**
+     * @notice Burns collected tokens by transferring them to the burn address
+     * @param currency The currency to burn
+     * @dev Can be called by anyone to burn collected tokens
+     */
+    function burnCollectedTokens(Currency currency) external {
+        uint256 amount = collectedForBurning[currency];
+        if (amount > 0) {
+            collectedForBurning[currency] = 0;
+            IERC20(Currency.unwrap(currency)).transfer(burnAddress, amount);
+            emit TokensBurned(currency, amount);
+        }
+    }
 
     // -------------------------------------------------------------------
     //                          ADMIN FUNCTIONS

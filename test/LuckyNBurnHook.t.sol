@@ -31,6 +31,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
     event SetFees(uint16 lucky, uint16 discounted, uint16 normal, uint16 unlucky);
     event SetCooldown(uint256 period);
     event SetBurnConfig(address burnAddress, uint16 burnShareBps);
+    event TokensBurned(Currency indexed currency, uint256 amount);
 
     error WrappedError(address target, bytes4 selector, bytes reason, bytes details);
 
@@ -44,7 +45,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
     address internal trader = address(0x1234);
 
     /// @notice Sets up the test environment for LuckyNBurnHook tests.
-/// @notice Sets up the test environment for LuckyNBurnHook tests.
     function setUp() public {
         // Deploy fresh manager and routers
         deployFreshManagerAndRouters();
@@ -330,19 +330,51 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertGt(hook.lastLuckyTimestamp(trader2), 0);
     }
 
-    /// @notice Test that unlucky tier triggers burning mechanism
-    function test_unlucky_burning() public {
+    /// @notice Test that unlucky tier triggers token collection mechanism
+    function test_unlucky_collection() public {
         // Force unlucky tier
         hook.setChances(0, 0, 0, 10000);
 
-        uint256 initialBurnBalance = BURN_ADDRESS.balance;
-        console.log("0");
-        // Perform swap that should trigger burning
+        uint256 initialCollected = hook.collectedForBurning(currency1);
+
+        // Perform swap that should trigger collection
+        _performSwap(trader, keccak256("collection-test"));
+
+        // Check that tokens were collected for burning
+        uint256 finalCollected = hook.collectedForBurning(currency1);
+        assertGt(finalCollected, initialCollected);
+
+        // Calculate expected collection amount
+        uint256 amountIn = 1 ether;
+        uint256 totalFee = (amountIn * 100) / 10_000; // 100 bps = 1%
+        uint256 expectedCollection = (totalFee * 5000) / 10_000; // 50% burn share
+
+        assertEq(finalCollected - initialCollected, expectedCollection);
+    }
+
+    /// @notice Test burning of collected tokens
+    function test_burn_collected_tokens() public {
+        // Force unlucky tier and perform swap to collect tokens
+        hook.setChances(0, 0, 0, 10000);
         _performSwap(trader, keccak256("burn-test"));
 
-        console.log("8");
-        // Check that burn address received tokens
-        assertGt(BURN_ADDRESS.balance, initialBurnBalance);
+        uint256 collectedAmount = hook.collectedForBurning(currency1);
+        assertGt(collectedAmount, 0);
+
+        uint256 initialBurnBalance = IERC20(Currency.unwrap(currency1)).balanceOf(BURN_ADDRESS);
+
+        // Burn the collected tokens
+        vm.expectEmit(true, false, false, true);
+        emit TokensBurned(currency1, collectedAmount);
+
+        hook.burnCollectedTokens(currency1);
+
+        // Check that tokens were transferred to burn address
+        uint256 finalBurnBalance = IERC20(Currency.unwrap(currency1)).balanceOf(BURN_ADDRESS);
+        assertEq(finalBurnBalance - initialBurnBalance, collectedAmount);
+
+        // Check that collected amount was reset
+        assertEq(hook.collectedForBurning(currency1), 0);
     }
 
     /// @notice Test hook permissions are set correctly
@@ -360,7 +392,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertFalse(permissions.beforeDonate);
         assertFalse(permissions.afterDonate);
         assertFalse(permissions.beforeSwapReturnDelta);
-        assertTrue(permissions.afterSwapReturnDelta);
+        assertTrue(permissions.afterSwapReturnDelta);  // Hook returns deltas for fee collection
         assertFalse(permissions.afterAddLiquidityReturnDelta);
         assertFalse(permissions.afterRemoveLiquidityReturnDelta);
     }
@@ -418,7 +450,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         console.log("test_all_tier_types_selectable 2.3");
         emit Lucky(trader, 10, ts);
         console.log("test_all_tier_types_selectable 2.4");
-        _performSwap(trader, keccak256("lucky")); // should match keccak256("Lucky(address,uint16,uint256)")
+        _performSwap(trader, keccak256("lucky"));
 
         console.log("test_all_tier_types_selectable 3");
         // Test Discounted
@@ -443,8 +475,14 @@ contract TestLuckyNBurnHook is Test, Deployers {
         hook.setChances(0, 0, 0, 10000);
         vm.warp(ts + 2 hours);
         ts = block.timestamp;
+
+        // Calculate expected burn amount
+        uint256 amountIn = 1 ether; // Swap amount
+        uint256 totalFee = (amountIn * 100) / 10_000; // 100 bps = 1%
+        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share = 5000000000000000 wei
+
         vm.expectEmit(true, true, false, true);
-        emit Unlucky(trader, 100, 0); // burnAmount will be calculated
+        emit Unlucky(trader, 100, expectedBurnAmount); // expectedBurnAmount = 5000000000000000
         _performSwap(trader, keccak256("unlucky"));
     }
 
@@ -452,9 +490,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_randomness_with_different_salts() public {
         // This test is probabilistic, but with enough different salts
         // we should see different outcomes if randomness is working
-
-        // bool seenDifferentOutcomes = false;
-        // uint8 firstOutcome = 255; // Invalid initial value
 
         for (uint256 i = 0; i < 20; i++) {
             bytes32 salt = keccak256(abi.encodePacked("random-test", i));

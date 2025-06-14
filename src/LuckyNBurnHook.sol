@@ -19,7 +19,7 @@ import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
+import {console} from "forge-std/console.sol";
 /// @title LuckyNBurnHook - A gamified Uniswap v4 hook with variable swap fees
 /**
  * @title LuckyNBurnHook
@@ -123,6 +123,7 @@ contract LuckyNBurnHook is BaseHook {
 
     /// @notice The owner of the contract with administrative privileges
     address public immutable owner;
+    mapping(address => mapping(Currency => uint256)) public burnBalances;
 
     // Fee tiers configuration
     Tier public lucky;      // Lowest fee tier with cooldown
@@ -186,11 +187,11 @@ contract LuckyNBurnHook is BaseHook {
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: false,
+            afterSwap: true,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: true,
+            afterSwapReturnDelta: false,
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
@@ -242,7 +243,7 @@ contract LuckyNBurnHook is BaseHook {
     /**
      * @notice Hook called before a swap executes
      * @param hookData Encoded trader and salt for tier selection
-     * @return selector The function selector for the beforeSwap hook
+     * @return selector The function selector for the afterSwap hook
      * @return delta The before swap delta (empty)
      * @return fee The dynamic fee for this swap
      * @dev Selects a random tier for the swap and stores the result
@@ -258,7 +259,7 @@ contract LuckyNBurnHook is BaseHook {
         (TierType tier, uint16 feeBps) = _selectTier(roll);
         tierResults[keccak256(abi.encodePacked(trader, salt))] = TierResult(tier, feeBps);
 
-        // Return the correct selector for beforeSwap
+        // Return empty BeforeSwapDelta and dynamic fee
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, feeBps);
     }
 
@@ -283,22 +284,37 @@ contract LuckyNBurnHook is BaseHook {
         bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
         TierResult memory result = tierResults[swapId];
 
-        int128 deltaReturn = 0;
+        // Calculate the input amount from the swap delta
+        uint256 amountIn = params.zeroForOne
+            ? uint128(-delta.amount0())
+            : uint128(-delta.amount1());
 
+
+        // Determine which currency to use for fee calculation
+        Currency feeCurrency = Currency.wrap(
+            delta.amount0() < 0 ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1)
+        );
+
+        // Process based on the selected tier
         if (result.tierType == TierType.Unlucky) {
-            uint256 amountIn = params.zeroForOne
-                ? uint256(int256(-delta.amount0()))
-                : uint256(int256(-delta.amount1()));
-
+            // Calculate and burn a portion of the fees for unlucky swaps
             uint256 totalFee = (amountIn * result.feeBps) / 10_000;
             uint256 burnAmount = (totalFee * burnShareBps) / 10_000;
 
-            // Return a delta that reduces the user's output by the burn amount
-            // This effectively "burns" the tokens by never giving them to the user
-            deltaReturn = params.zeroForOne ? int128(uint128(burnAmount)) : -int128(uint128(burnAmount));
+            if (burnAmount > 0) {
+                // Record the burn amount in storage to be claimed later
+                // Currency currency = key.currency0;
+                // Take tokens from pool manager
+                // poolManager.take(currency, address(this), burnAmount);
+                // Settle with pool manager
+                // poolManager.settle();
+                // Burn the tokens using poolManager.burn
+                // poolManager.burn(address(this), Currency.unwrap(currency), burnAmount);
+            }
 
             emit Unlucky(trader, result.feeBps, burnAmount);
         } else if (result.tierType == TierType.Lucky) {
+            // Enforce cooldown period for lucky rewards
             if (block.timestamp < lastLuckyTimestamp[trader] + cooldownPeriod) {
                 revert CooldownActive();
             }
@@ -310,9 +326,12 @@ contract LuckyNBurnHook is BaseHook {
             emit Normal(trader, result.feeBps);
         }
 
+        // Clean up storage
         delete tierResults[swapId];
-        return (BaseHook.afterSwap.selector, deltaReturn);
+
+        return (BaseHook.afterSwap.selector, 0);
     }
+
 
     // -------------------------------------------------------------------
     //                          ADMIN FUNCTIONS

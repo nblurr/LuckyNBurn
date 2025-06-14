@@ -15,6 +15,7 @@ import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol
 import {LuckyNBurnHook} from "../src/LuckyNBurnHook.sol";
 import {ImmutableState} from "../lib/v4-periphery/src/base/ImmutableState.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {console} from "forge-std/console.sol";
 
 contract TestLuckyNBurnHook is Test, Deployers {
     using CurrencyLibrary for Currency;
@@ -35,6 +36,9 @@ contract TestLuckyNBurnHook is Test, Deployers {
     LuckyNBurnHook internal hook;
     PoolKey internal poolKey;
 
+        /// @notice The address where burned tokens are sent
+    address public burnAddress;
+
     address internal constant BURN_ADDRESS = address(0xdEaD);
     address internal trader = address(0x1234);
 
@@ -45,7 +49,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
         // Deploy hook to an address that has the proper flags set
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG);
-        deployCodeTo("LuckyNBurnHook.sol", abi.encode(manager), address(flags));
+        deployCodeTo("LuckyNBurnHook.sol:LuckyNBurnHook", abi.encode(manager), address(flags));
         hook = LuckyNBurnHook(address(flags));
 
         poolKey = PoolKey({
@@ -60,6 +64,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Add initial liquidity to the pool
         uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
         uint256 token0ToAdd = 10 ether;
+        burnAddress = 0x000000000000000000000000000000000000dEaD; // Burn address
         uint128 liquidityDelta =
                             LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_1, sqrtPriceAtTickUpper, token0ToAdd);
 
@@ -137,6 +142,9 @@ contract TestLuckyNBurnHook is Test, Deployers {
     /// @notice Test basic swap functionality - should emit one of the tier events
     function test_basic_swap() public {
         bytes32 salt = keccak256("test-salt-1");
+
+        uint256 ts = block.timestamp;
+        vm.warp(ts + 2 hours); 
 
         // Just perform the swap and verify it doesn't revert
         // The specific tier is random, so we can't predict which event will be emitted
@@ -311,14 +319,17 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
     /// @notice Test that unlucky tier triggers burning mechanism
     function test_unlucky_burning() public {
+        PoolKey memory key;
+
         // Force unlucky tier
         hook.setChances(0, 0, 0, 10000);
 
         uint256 initialBurnBalance = BURN_ADDRESS.balance;
-
+        console.log("0");
         // Perform swap that should trigger burning
         _performSwap(trader, keccak256("burn-test"));
 
+        console.log("8");
         // Check that burn address received tokens
         assertGt(BURN_ADDRESS.balance, initialBurnBalance);
     }
@@ -381,31 +392,46 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_all_tier_types_selectable() public {
         // Test by forcing each tier type to 100% chance
 
+        console.log("test_all_tier_types_selectable 1");
         // Test Lucky - first ensure no cooldown is active
-        uint256 currentTime = block.timestamp;
+        vm.warp(1000); // fixed base timestamp
+        uint256 ts = block.timestamp;
 
+        console.log("test_all_tier_types_selectable 2");
         hook.setChances(10000, 0, 0, 0);
+        console.log("test_all_tier_types_selectable 2.1");
+        vm.warp(ts + 2 hours); 
+        ts = block.timestamp;
+        console.log("test_all_tier_types_selectable 2.2");
         vm.expectEmit(true, true, false, true);
-        emit Lucky(trader, 10, currentTime);
-        _performSwap(trader, keccak256("lucky"));
+        console.log("test_all_tier_types_selectable 2.3");
+        emit Lucky(trader, 10, ts);
+        console.log("test_all_tier_types_selectable 2.4");
+        _performSwap(trader, keccak256("lucky")); // should match keccak256("Lucky(address,uint16,uint256)")
 
-        // Wait for cooldown to pass
-        vm.warp(currentTime + 2 hours);
-
+        console.log("test_all_tier_types_selectable 3");
         // Test Discounted
         hook.setChances(0, 10000, 0, 0);
+        vm.warp(ts + 2 hours); 
+        ts = block.timestamp;
         vm.expectEmit(true, true, false, false);
         emit Discounted(trader, 25);
         _performSwap(trader, keccak256("discounted"));
 
+        console.log("test_all_tier_types_selectable 4");
         // Test Normal
         hook.setChances(0, 0, 10000, 0);
+        vm.warp(ts + 2 hours); 
+        ts = block.timestamp;
         vm.expectEmit(true, true, false, false);
         emit Normal(trader, 50);
         _performSwap(trader, keccak256("normal"));
 
+        console.log("test_all_tier_types_selectable 5");
         // Test Unlucky
         hook.setChances(0, 0, 0, 10000);
+        vm.warp(ts + 2 hours); 
+        ts = block.timestamp; 
         vm.expectEmit(true, true, false, true);
         emit Unlucky(trader, 100, 0); // burnAmount will be calculated
         _performSwap(trader, keccak256("unlucky"));
@@ -415,8 +441,9 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_randomness_with_different_salts() public {
         // This test is probabilistic, but with enough different salts
         // we should see different outcomes if randomness is working
-        bool seenDifferentOutcomes = false;
-        uint8 firstOutcome = 255; // Invalid initial value
+        
+        // bool seenDifferentOutcomes = false;
+        // uint8 firstOutcome = 255; // Invalid initial value
 
         for (uint256 i = 0; i < 20; i++) {
             bytes32 salt = keccak256(abi.encodePacked("random-test", i));

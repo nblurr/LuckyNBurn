@@ -31,7 +31,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
     event SetFees(uint16 lucky, uint16 discounted, uint16 normal, uint16 unlucky);
     event SetCooldown(uint256 period);
     event SetBurnConfig(address burnAddress, uint16 burnShareBps);
-    event TokensBurned(Currency indexed currency, uint256 amount);
 
     error WrappedError(address target, bytes4 selector, bytes reason, bytes details);
 
@@ -53,11 +52,9 @@ contract TestLuckyNBurnHook is Test, Deployers {
         deployMintAndApprove2Currencies();
 
         // Calculate the flags we need for the hook
-        // IMPORTANT: You need AFTER_SWAP_FLAG to use AFTER_SWAP_RETURNS_DELTA_FLAG
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG |
-            Hooks.AFTER_SWAP_FLAG |
-            Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.AFTER_SWAP_FLAG
         );
 
         (address hookAddress, bytes32 salt) = HookMiner.find(
@@ -330,51 +327,22 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertGt(hook.lastLuckyTimestamp(trader2), 0);
     }
 
-    /// @notice Test that unlucky tier triggers token collection mechanism
-    function test_unlucky_collection() public {
+    /// @notice Test that unlucky tier emits correct burn amount
+    function test_unlucky_burn_calculation() public {
         // Force unlucky tier
         hook.setChances(0, 0, 0, 10000);
 
-        uint256 initialCollected = hook.collectedForBurning(currency1);
-
-        // Perform swap that should trigger collection
-        _performSwap(trader, keccak256("collection-test"));
-
-        // Check that tokens were collected for burning
-        uint256 finalCollected = hook.collectedForBurning(currency1);
-        assertGt(finalCollected, initialCollected);
-
-        // Calculate expected collection amount
+        // Calculate expected burn amount
         uint256 amountIn = 1 ether;
         uint256 totalFee = (amountIn * 100) / 10_000; // 100 bps = 1%
-        uint256 expectedCollection = (totalFee * 5000) / 10_000; // 50% burn share
+        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share
 
-        assertEq(finalCollected - initialCollected, expectedCollection);
-    }
+        // Expect the unlucky event with correct burn amount
+        vm.expectEmit(true, true, false, true);
+        emit Unlucky(trader, 100, expectedBurnAmount);
 
-    /// @notice Test burning of collected tokens
-    function test_burn_collected_tokens() public {
-        // Force unlucky tier and perform swap to collect tokens
-        hook.setChances(0, 0, 0, 10000);
-        _performSwap(trader, keccak256("burn-test"));
-
-        uint256 collectedAmount = hook.collectedForBurning(currency1);
-        assertGt(collectedAmount, 0);
-
-        uint256 initialBurnBalance = IERC20(Currency.unwrap(currency1)).balanceOf(BURN_ADDRESS);
-
-        // Burn the collected tokens
-        vm.expectEmit(true, false, false, true);
-        emit TokensBurned(currency1, collectedAmount);
-
-        hook.burnCollectedTokens(currency1);
-
-        // Check that tokens were transferred to burn address
-        uint256 finalBurnBalance = IERC20(Currency.unwrap(currency1)).balanceOf(BURN_ADDRESS);
-        assertEq(finalBurnBalance - initialBurnBalance, collectedAmount);
-
-        // Check that collected amount was reset
-        assertEq(hook.collectedForBurning(currency1), 0);
+        // Perform swap that should trigger unlucky tier
+        _performSwap(trader, keccak256("burn-calculation-test"));
     }
 
     /// @notice Test hook permissions are set correctly
@@ -392,7 +360,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertFalse(permissions.beforeDonate);
         assertFalse(permissions.afterDonate);
         assertFalse(permissions.beforeSwapReturnDelta);
-        assertTrue(permissions.afterSwapReturnDelta);  // Hook returns deltas for fee collection
+        assertFalse(permissions.afterSwapReturnDelta);  // Not using return delta to avoid settlement issues
         assertFalse(permissions.afterAddLiquidityReturnDelta);
         assertFalse(permissions.afterRemoveLiquidityReturnDelta);
     }

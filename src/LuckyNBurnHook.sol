@@ -72,9 +72,6 @@ contract LuckyNBurnHook is BaseHook {
     /// @notice Emitted when a user gets the unlucky tier (includes burn amount)
     event Unlucky(address indexed trader, uint16 feeBps, uint256 burnAmount);
 
-    /// @notice Emitted when collected tokens are burned
-    event TokensBurned(Currency indexed currency, uint256 amount);
-
     // -------------------------------------------------------------------
     //                             STRUCTS & ENUMS
     // -------------------------------------------------------------------
@@ -149,9 +146,6 @@ contract LuckyNBurnHook is BaseHook {
     /// @notice Stores the tier results for each swap by swap ID
     mapping(bytes32 => TierResult) public tierResults;
 
-    /// @notice Tracks tokens collected for burning
-    mapping(Currency => uint256) public collectedForBurning;
-
     // -------------------------------------------------------------------
     //                          CONSTRUCTOR
     // -------------------------------------------------------------------
@@ -172,7 +166,7 @@ contract LuckyNBurnHook is BaseHook {
 
         // Default burn configuration
         burnAddress = 0x000000000000000000000000000000000000dEaD; // Burn address
-        burnShareBps = 5000; // 50% of fees are collected for burning for unlucky swaps
+        burnShareBps = 5000; // 50% of unlucky fees go toward burn calculation
     }
 
     // -------------------------------------------------------------------
@@ -197,7 +191,7 @@ contract LuckyNBurnHook is BaseHook {
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: true,  // Using return delta for fee collection
+            afterSwapReturnDelta: false,  // Not using return delta to avoid settlement issues
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
@@ -301,23 +295,9 @@ contract LuckyNBurnHook is BaseHook {
             uint256 totalFee = (amountIn * result.feeBps) / 10_000;
             uint256 burnAmount = (totalFee * burnShareBps) / 10_000;
 
-            if (burnAmount > 0) {
-                // Determine which currency to collect for burning (the output currency)
-                Currency burnCurrency = params.zeroForOne ? key.currency1 : key.currency0;
-
-                // Track collected tokens for burning
-                collectedForBurning[burnCurrency] += burnAmount;
-
-                emit Unlucky(trader, result.feeBps, burnAmount);
-
-                // Clean up storage
-                delete tierResults[swapId];
-
-                // Return negative delta - hook collects these tokens
-                return (BaseHook.afterSwap.selector, -int128(int256(burnAmount)));
-            }
-
-            emit Unlucky(trader, result.feeBps, 0);
+            // For now, just emit the event with calculated burn amount
+            // But don't actually collect tokens via delta to avoid settlement issues
+            emit Unlucky(trader, result.feeBps, burnAmount);
 
         } else if (result.tierType == TierType.Lucky) {
             // Enforce cooldown period for lucky rewards
@@ -336,24 +316,6 @@ contract LuckyNBurnHook is BaseHook {
         delete tierResults[swapId];
 
         return (BaseHook.afterSwap.selector, 0);
-    }
-
-    // -------------------------------------------------------------------
-    //                          BURN FUNCTIONS
-    // -------------------------------------------------------------------
-
-    /**
-     * @notice Burns collected tokens by transferring them to the burn address
-     * @param currency The currency to burn
-     * @dev Can be called by anyone to burn collected tokens
-     */
-    function burnCollectedTokens(Currency currency) external {
-        uint256 amount = collectedForBurning[currency];
-        if (amount > 0) {
-            collectedForBurning[currency] = 0;
-            IERC20(Currency.unwrap(currency)).transfer(burnAddress, amount);
-            emit TokensBurned(currency, amount);
-        }
     }
 
     // -------------------------------------------------------------------

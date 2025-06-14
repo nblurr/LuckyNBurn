@@ -36,7 +36,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
     LuckyNBurnHook internal hook;
     PoolKey internal poolKey;
 
-        /// @notice The address where burned tokens are sent
+    /// @notice The address where burned tokens are sent
     address public burnAddress;
 
     address internal constant BURN_ADDRESS = address(0xdEaD);
@@ -47,9 +47,18 @@ contract TestLuckyNBurnHook is Test, Deployers {
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
 
-        // Deploy hook to an address that has the proper flags set
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG);
-        deployCodeTo("LuckyNBurnHook.sol:LuckyNBurnHook", abi.encode(manager), address(flags));
+        // Calculate the flags we need for the hook (BEFORE_SWAP | AFTER_SWAP_RETURN_DELTA)
+        uint160 flags = uint160(
+            Hooks.BEFORE_SWAP_FLAG |
+            Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+        );
+
+        // Deploy the hook to an address with the right flags
+        deployCodeTo(
+            "LuckyNBurnHook.sol:LuckyNBurnHook",
+            abi.encode(manager),
+            address(flags)
+        );
         hook = LuckyNBurnHook(address(flags));
 
         poolKey = PoolKey({
@@ -64,14 +73,13 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Add initial liquidity to the pool
         uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
         uint256 token0ToAdd = 10 ether;
-        burnAddress = 0x000000000000000000000000000000000000dEaD; // Burn address
         uint128 liquidityDelta =
                             LiquidityAmounts.getLiquidityForAmount0(SQRT_PRICE_1_1, sqrtPriceAtTickUpper, token0ToAdd);
 
         modifyLiquidityRouter.modifyLiquidity{value: token0ToAdd}(
             poolKey,
             ModifyLiquidityParams({
-                tickLower: -60,
+                tickLower: - 60,
                 tickUpper: 60,
                 liquidityDelta: int256(uint256(liquidityDelta)),
                 salt: bytes32(0)
@@ -96,7 +104,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
         SwapParams memory swapParams = SwapParams({
             zeroForOne: true,
-            amountSpecified: -1 ether,
+            amountSpecified: - 1 ether,
             sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
         });
 
@@ -144,7 +152,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         bytes32 salt = keccak256("test-salt-1");
 
         uint256 ts = block.timestamp;
-        vm.warp(ts + 2 hours); 
+        vm.warp(ts + 2 hours);
 
         // Just perform the swap and verify it doesn't revert
         // The specific tier is random, so we can't predict which event will be emitted
@@ -304,7 +312,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         bytes memory hookData = abi.encode(trader2, salt2);
         SwapParams memory swapParams = SwapParams({
             zeroForOne: true,
-            amountSpecified: -1 ether,
+            amountSpecified: - 1 ether,
             sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
         });
         swapRouter.swap(poolKey, swapParams, PoolSwapTest.TestSettings({
@@ -319,8 +327,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
     /// @notice Test that unlucky tier triggers burning mechanism
     function test_unlucky_burning() public {
-        PoolKey memory key;
-
         // Force unlucky tier
         hook.setChances(0, 0, 0, 10000);
 
@@ -400,7 +406,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         console.log("test_all_tier_types_selectable 2");
         hook.setChances(10000, 0, 0, 0);
         console.log("test_all_tier_types_selectable 2.1");
-        vm.warp(ts + 2 hours); 
+        vm.warp(ts + 2 hours);
         ts = block.timestamp;
         console.log("test_all_tier_types_selectable 2.2");
         vm.expectEmit(true, true, false, true);
@@ -412,7 +418,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         console.log("test_all_tier_types_selectable 3");
         // Test Discounted
         hook.setChances(0, 10000, 0, 0);
-        vm.warp(ts + 2 hours); 
+        vm.warp(ts + 2 hours);
         ts = block.timestamp;
         vm.expectEmit(true, true, false, false);
         emit Discounted(trader, 25);
@@ -421,7 +427,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         console.log("test_all_tier_types_selectable 4");
         // Test Normal
         hook.setChances(0, 0, 10000, 0);
-        vm.warp(ts + 2 hours); 
+        vm.warp(ts + 2 hours);
         ts = block.timestamp;
         vm.expectEmit(true, true, false, false);
         emit Normal(trader, 50);
@@ -430,8 +436,8 @@ contract TestLuckyNBurnHook is Test, Deployers {
         console.log("test_all_tier_types_selectable 5");
         // Test Unlucky
         hook.setChances(0, 0, 0, 10000);
-        vm.warp(ts + 2 hours); 
-        ts = block.timestamp; 
+        vm.warp(ts + 2 hours);
+        ts = block.timestamp;
         vm.expectEmit(true, true, false, true);
         emit Unlucky(trader, 100, 0); // burnAmount will be calculated
         _performSwap(trader, keccak256("unlucky"));
@@ -441,7 +447,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_randomness_with_different_salts() public {
         // This test is probabilistic, but with enough different salts
         // we should see different outcomes if randomness is working
-        
+
         // bool seenDifferentOutcomes = false;
         // uint8 firstOutcome = 255; // Invalid initial value
 
@@ -492,7 +498,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         bytes memory hookData = abi.encode(fuzzTrader, salt);
         SwapParams memory swapParams = SwapParams({
             zeroForOne: true,
-            amountSpecified: -1 ether,
+            amountSpecified: - 1 ether,
             sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
         });
 

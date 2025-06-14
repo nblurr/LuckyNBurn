@@ -187,11 +187,11 @@ contract LuckyNBurnHook is BaseHook {
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: true,
+            afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: false,
+            afterSwapReturnDelta: true,  // Using return delta for burning
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
@@ -206,7 +206,7 @@ contract LuckyNBurnHook is BaseHook {
      * @param trader The address of the trader
      * @param salt A unique salt for the swap
      * @return A random number between 0 and 9,999 (inclusive)
-     * @dev Uses block.timestamp and blockhash for randomness (not suitable for production)
+     * @dev Uses block.timestamp and block-hash for randomness (not suitable for production)
      */
     function _getRoll(address trader, bytes32 salt) internal view returns (uint16) {
         return uint16(uint256(keccak256(abi.encodePacked(
@@ -265,7 +265,6 @@ contract LuckyNBurnHook is BaseHook {
 
     /**
      * @notice Hook called after a swap executes to process fees and rewards
-     * @param key The pool key
      * @param params Swap parameters
      * @param delta The balance delta from the swap
      * @param hookData Encoded trader and salt for tier lookup
@@ -275,7 +274,7 @@ contract LuckyNBurnHook is BaseHook {
      */
     function _afterSwap(
         address,
-        PoolKey calldata key,
+        PoolKey calldata,
         SwapParams calldata params,
         BalanceDelta delta,
         bytes calldata hookData
@@ -289,30 +288,21 @@ contract LuckyNBurnHook is BaseHook {
             ? uint128(-delta.amount0())
             : uint128(-delta.amount1());
 
-
-        // Determine which currency to use for fee calculation
-        Currency feeCurrency = Currency.wrap(
-            delta.amount0() < 0 ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1)
-        );
-
         // Process based on the selected tier
         if (result.tierType == TierType.Unlucky) {
-            // Calculate and burn a portion of the fees for unlucky swaps
+            // Calculate the burn amount for unlucky swaps
             uint256 totalFee = (amountIn * result.feeBps) / 10_000;
             uint256 burnAmount = (totalFee * burnShareBps) / 10_000;
 
+            // Return negative delta to reduce output amount (effectively burning)
             if (burnAmount > 0) {
-                // Record the burn amount in storage to be claimed later
-                // Currency currency = key.currency0;
-                // Take tokens from pool manager
-                // poolManager.take(currency, address(this), burnAmount);
-                // Settle with pool manager
-                // poolManager.settle();
-                // Burn the tokens using poolManager.burn
-                // poolManager.burn(address(this), Currency.unwrap(currency), burnAmount);
+                emit Unlucky(trader, result.feeBps, burnAmount);
+                // Convert burnAmount to negative int128 and return
+                // The delta is applied to the output token (token1 for zeroForOne, token0 otherwise)
+                return (BaseHook.afterSwap.selector, -int128(int256(burnAmount)));
             }
 
-            emit Unlucky(trader, result.feeBps, burnAmount);
+            emit Unlucky(trader, result.feeBps, 0);
         } else if (result.tierType == TierType.Lucky) {
             // Enforce cooldown period for lucky rewards
             if (block.timestamp < lastLuckyTimestamp[trader] + cooldownPeriod) {

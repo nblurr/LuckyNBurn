@@ -257,6 +257,11 @@ contract LuckyNBurnHook is BaseHook {
         (address trader, bytes32 salt) = abi.decode(hookData, (address, bytes32));
         uint16 roll = _getRoll(trader, salt);
         (TierType tier, uint16 feeBps) = _selectTier(roll);
+        if (tier == TierType.Lucky) {
+            if (block.timestamp < lastLuckyTimestamp[trader] + cooldownPeriod) {
+                revert CooldownActive();
+            }
+        }
         tierResults[keccak256(abi.encodePacked(trader, salt))] = TierResult(tier, feeBps);
 
         // Return empty BeforeSwapDelta and dynamic fee
@@ -300,10 +305,6 @@ contract LuckyNBurnHook is BaseHook {
             emit Unlucky(trader, result.feeBps, burnAmount);
 
         } else if (result.tierType == TierType.Lucky) {
-            // Enforce cooldown period for lucky rewards
-            if (block.timestamp < lastLuckyTimestamp[trader] + cooldownPeriod) {
-                revert CooldownActive();
-            }
             lastLuckyTimestamp[trader] = block.timestamp;
             emit Lucky(trader, result.feeBps, block.timestamp);
         } else if (result.tierType == TierType.Discounted) {

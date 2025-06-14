@@ -21,12 +21,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console} from "forge-std/console.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 
-/// @title LuckyNBurnHook - A gamified Uniswap v4 hook with variable swap fees
-/**
- * @title LuckyNBurnHook
- * @notice A Uniswap v4 hook that implements a gamified fee structure with different tiers
- * @dev Inherits from BaseHook and implements the required hook functions for swap operations
- */
 contract LuckyNBurnHook is BaseHook {
     // -------------------------------------------------------------------
     //                              ERRORS
@@ -43,6 +37,12 @@ contract LuckyNBurnHook is BaseHook {
 
     /// @notice Thrown when the burn share is set higher than 100% (10,000 basis points)
     error BurnShareTooHigh();
+
+    /// @notice Thrown when trying to burn tokens but no tokens are collected
+    error NothingToBurn();
+
+    /// @notice Thrown when token transfer fails
+    error TransferFailed();
 
     // -------------------------------------------------------------------
     //                              EVENTS
@@ -72,6 +72,9 @@ contract LuckyNBurnHook is BaseHook {
     /// @notice Emitted when a user gets the unlucky tier (includes burn amount)
     event Unlucky(address indexed trader, uint16 feeBps, uint256 burnAmount);
 
+    /// @notice Emitted when tokens are burned
+    event TokensBurned(Currency indexed currency, uint256 amount);
+
     // -------------------------------------------------------------------
     //                             STRUCTS & ENUMS
     // -------------------------------------------------------------------
@@ -90,10 +93,11 @@ contract LuckyNBurnHook is BaseHook {
      * @notice Enumerates the possible tier types
      */
     enum TierType {
-        Lucky,      // Lowest fees with cooldown
+        Lucky, // Lowest fees with cooldown
         Discounted, // Reduced fees
-        Normal,     // Standard fees
-        Unlucky     // Highest fees with burn
+        Normal, // Standard fees
+        Unlucky // Highest fees with burn
+
     }
 
     /**
@@ -126,10 +130,10 @@ contract LuckyNBurnHook is BaseHook {
     address public immutable owner;
 
     // Fee tiers configuration
-    Tier public lucky;      // Lowest fee tier with cooldown
+    Tier public lucky; // Lowest fee tier with cooldown
     Tier public discounted; // Reduced fee tier
-    Tier public normal;     // Standard fee tier
-    Tier public unlucky;    // Highest fee tier with burn
+    Tier public normal; // Standard fee tier
+    Tier public unlucky; // Highest fee tier with burn
 
     /// @notice The address where burned tokens are sent
     address public burnAddress;
@@ -146,6 +150,9 @@ contract LuckyNBurnHook is BaseHook {
     /// @notice Stores the tier results for each swap by swap ID
     mapping(bytes32 => TierResult) public tierResults;
 
+    /// @notice Tracks tokens collected for burning by currency
+    mapping(Currency => uint256) public collectedForBurning;
+
     // -------------------------------------------------------------------
     //                          CONSTRUCTOR
     // -------------------------------------------------------------------
@@ -159,10 +166,10 @@ contract LuckyNBurnHook is BaseHook {
         owner = msg.sender;
 
         // Initialize fee tiers (chanceBps, feeBps)
-        lucky = Tier(1000, 10);      // 10% chance, 0.1% fee
-        discounted = Tier(3000, 25);  // 30% chance, 0.25% fee
-        normal = Tier(5000, 50);      // 50% chance, 0.5% fee
-        unlucky = Tier(1000, 100);    // 10% chance, 1% fee
+        lucky = Tier(1000, 10); // 10% chance, 0.1% fee
+        discounted = Tier(3000, 25); // 30% chance, 0.25% fee
+        normal = Tier(5000, 50); // 50% chance, 0.5% fee
+        unlucky = Tier(1000, 100); // 10% chance, 1% fee
 
         // Default burn configuration
         burnAddress = 0x000000000000000000000000000000000000dEaD; // Burn address
@@ -191,7 +198,7 @@ contract LuckyNBurnHook is BaseHook {
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: false,  // Not using return delta to avoid settlement issues
+            afterSwapReturnDelta: true, // ENABLE: Required to return delta from afterSwap
             afterAddLiquidityReturnDelta: false,
             afterRemoveLiquidityReturnDelta: false
         });
@@ -209,12 +216,9 @@ contract LuckyNBurnHook is BaseHook {
      * @dev Uses block.timestamp and block-hash for randomness (not suitable for production)
      */
     function _getRoll(address trader, bytes32 salt) internal view returns (uint16) {
-        return uint16(uint256(keccak256(abi.encodePacked(
-            trader,
-            salt,
-            block.timestamp,
-            blockhash(block.number - 1)
-        ))) % 10_000);
+        return uint16(
+            uint256(keccak256(abi.encodePacked(trader, salt, block.timestamp, blockhash(block.number - 1)))) % 10_000
+        );
     }
 
     /**
@@ -248,12 +252,11 @@ contract LuckyNBurnHook is BaseHook {
      * @return fee The dynamic fee for this swap
      * @dev Selects a random tier for the swap and stores the result
      */
-    function _beforeSwap(
-        address,
-        PoolKey calldata,
-        SwapParams calldata,
-        bytes calldata hookData
-    ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
+    function _beforeSwap(address, PoolKey calldata, SwapParams calldata, bytes calldata hookData)
+    internal
+    override
+    returns (bytes4, BeforeSwapDelta, uint24)
+    {
         (address trader, bytes32 salt) = abi.decode(hookData, (address, bytes32));
         uint16 roll = _getRoll(trader, salt);
         (TierType tier, uint16 feeBps) = _selectTier(roll);
@@ -275,8 +278,8 @@ contract LuckyNBurnHook is BaseHook {
      * @param delta The balance delta from the swap
      * @param hookData Encoded trader and salt for tier lookup
      * @return selector The function selector
-     * @return deltaReturn The delta to return to the pool
-     * @dev Processes fees, collects tokens for burning for unlucky swaps, and applies cooldowns
+     * @return hookDelta The delta the hook takes (for burn amount)
+     * @dev Uses return delta to collect tokens for burning per official Uniswap v4 pattern
      */
     function _afterSwap(
         address,
@@ -289,21 +292,37 @@ contract LuckyNBurnHook is BaseHook {
         bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
         TierResult memory result = tierResults[swapId];
 
-        // Calculate the input amount from the swap delta
-        uint256 amountIn = params.zeroForOne
-            ? uint128(-delta.amount0())
-            : uint128(-delta.amount1());
-
-        // Process based on the selected tier
         if (result.tierType == TierType.Unlucky) {
-            // Calculate the burn amount for unlucky swaps
-            uint256 totalFee = (amountIn * result.feeBps) / 10_000;
-            uint256 burnAmount = (totalFee * burnShareBps) / 10_000;
+            bool isOutputToken1 = !params.zeroForOne;
+            int256 outputAmount = isOutputToken1 ? delta.amount1() : delta.amount0();
 
-            // For now, just emit the event with calculated burn amount
-            // But don't actually collect tokens via delta to avoid settlement issues
-            emit Unlucky(trader, result.feeBps, burnAmount);
+            if ((isOutputToken1 && outputAmount < 0) || (!isOutputToken1 && outputAmount > 0)) {
+                // Calculate the absolute output amount
+                uint256 outputAmountAbs = uint256(outputAmount < 0 ? - outputAmount : outputAmount);
+                // Calculate fee amount (1% of output)
+                uint256 feeAmount = (outputAmountAbs * result.feeBps) / 10_000;
+                // Calculate burn amount (50% of fee)
+                uint256 burnAmount = (feeAmount * burnShareBps) / 10_000;
 
+                if (burnAmount > 0) {
+                    // Track the burned amount
+                    Currency burnCurrency = isOutputToken1 ? key.currency1 : key.currency0;
+                    collectedForBurning[burnCurrency] += burnAmount;
+
+                    // Emit event with the burn amount
+                    emit Unlucky(trader, result.feeBps, burnAmount);
+
+                    // Clean up storage
+                    delete tierResults[swapId];
+
+                    // Return positive delta to reduce token1 output or negative delta to reduce token0 output
+                    int128 hookDelta = isOutputToken1
+                        ? int128(int256(burnAmount))    // Make token1 output less negative
+                        : - int128(int256(burnAmount));  // Make token0 output less positive
+
+                    return (BaseHook.afterSwap.selector, hookDelta);
+                }
+            }
         } else if (result.tierType == TierType.Lucky) {
             lastLuckyTimestamp[trader] = block.timestamp;
             emit Lucky(trader, result.feeBps, block.timestamp);
@@ -313,10 +332,53 @@ contract LuckyNBurnHook is BaseHook {
             emit Normal(trader, result.feeBps);
         }
 
-        // Clean up storage
+        // Clean up storage for non-Unlucky swaps or if no burn was needed
         delete tierResults[swapId];
-
         return (BaseHook.afterSwap.selector, 0);
+    }
+
+    // -------------------------------------------------------------------
+    //                          VIEW FUNCTIONS
+    // -------------------------------------------------------------------
+    function getCollectedForBurning(Currency currency) external view returns (uint256) {
+        return collectedForBurning[currency];
+    }
+
+    // -------------------------------------------------------------------
+    //                          BURN FUNCTIONS
+    // -------------------------------------------------------------------
+    /**
+     * @notice Burns collected tokens by transferring them to the burn address
+     * @param currency The currency to burn
+     * @dev Can be called by anyone to trigger the burn
+     */
+    function burnCollectedTokens(Currency currency) external {
+        uint256 amount = collectedForBurning[currency];
+        if (amount == 0) revert NothingToBurn();
+
+        collectedForBurning[currency] = 0;
+
+        // Transfer tokens to burn address
+        bool success = IERC20(Currency.unwrap(currency)).transfer(burnAddress, amount);
+        if (!success) revert TransferFailed();
+
+        emit TokensBurned(currency, amount);
+    }
+
+    /**
+     * @notice Burns collected tokens for multiple currencies in one transaction
+     * @param currencies Array of currencies to burn
+     */
+    function burnCollectedTokensBatch(Currency[] calldata currencies) external {
+        for (uint256 i = 0; i < currencies.length; i++) {
+            uint256 amount = collectedForBurning[currencies[i]];
+            if (amount > 0) {
+                collectedForBurning[currencies[i]] = 0;
+                bool success = IERC20(Currency.unwrap(currencies[i])).transfer(burnAddress, amount);
+                if (!success) revert TransferFailed();
+                emit TokensBurned(currencies[i], amount);
+            }
+        }
     }
 
     // -------------------------------------------------------------------
@@ -330,12 +392,10 @@ contract LuckyNBurnHook is BaseHook {
      * @param unluckyBps Chance for unlucky tier (in basis points)
      * @dev The sum of all chances must equal 10,000 (100%)
      */
-    function setChances(
-        uint16 luckyBps,
-        uint16 discountedBps,
-        uint16 normalBps,
-        uint16 unluckyBps
-    ) external onlyOwner {
+    function setChances(uint16 luckyBps, uint16 discountedBps, uint16 normalBps, uint16 unluckyBps)
+    external
+    onlyOwner
+    {
         if (luckyBps + discountedBps + normalBps + unluckyBps != 10_000) {
             revert InvalidChanceSum();
         }
@@ -353,12 +413,7 @@ contract LuckyNBurnHook is BaseHook {
      * @param normalFee Fee for normal tier (in basis points)
      * @param unluckyFee Fee for unlucky tier (in basis points)
      */
-    function setFees(
-        uint16 luckyFee,
-        uint16 discountedFee,
-        uint16 normalFee,
-        uint16 unluckyFee
-    ) external onlyOwner {
+    function setFees(uint16 luckyFee, uint16 discountedFee, uint16 normalFee, uint16 unluckyFee) external onlyOwner {
         lucky.feeBps = luckyFee;
         discounted.feeBps = discountedFee;
         normal.feeBps = normalFee;

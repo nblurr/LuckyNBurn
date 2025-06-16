@@ -240,6 +240,20 @@ contract LuckyNBurnHook is BaseHook {
         }
     }
 
+    function logTier(TierType tier) internal view {
+        if (tier == TierType.Lucky) {
+            console.log("Tier: Lucky");
+        } else if (tier == TierType.Discounted) {
+            console.log("Tier: Discounted");
+        } else if (tier == TierType.Normal) {
+            console.log("Tier: Normal");
+        } else if (tier == TierType.Unlucky) {
+            console.log("Tier: Unlucky");
+        } else {
+            console.log("Tier: Unknown");
+        }
+    }
+
     // -------------------------------------------------------------------
     //                          HOOK IMPLEMENTATION
     // -------------------------------------------------------------------
@@ -271,6 +285,12 @@ contract LuckyNBurnHook is BaseHook {
         return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, feeBps);
     }
 
+    struct BurnInfo {
+        Currency token;
+        uint256 amount;
+    }
+    mapping(address => BurnInfo) public pendingBurn;
+
     /**
      * @notice Hook called after a swap executes to process fees and rewards
      * @param key The pool key
@@ -284,7 +304,7 @@ contract LuckyNBurnHook is BaseHook {
     function _afterSwap(
         address,
         PoolKey calldata key,
-        SwapParams calldata params,
+        SwapParams calldata params, 
         BalanceDelta delta,
         bytes calldata hookData
     ) internal override returns (bytes4, int128) {
@@ -292,40 +312,53 @@ contract LuckyNBurnHook is BaseHook {
         bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
         TierResult memory result = tierResults[swapId];
 
+        // Goal, only burn token1 no matter the params.zeroForOne 
         if (result.tierType == TierType.Unlucky) {
-            bool isOutputToken1 = !params.zeroForOne;
-            int256 outputAmount = isOutputToken1 ? delta.amount1() : delta.amount0();
 
-            if ((isOutputToken1 && outputAmount < 0) || (!isOutputToken1 && outputAmount > 0)) {
-                // Calculate the absolute output amount
-                uint256 outputAmountAbs = uint256(outputAmount < 0 ? - outputAmount : outputAmount);
-                // Calculate fee amount (1% of output)
-                uint256 feeAmount = (outputAmountAbs * result.feeBps) / 10_000;
-                // Calculate burn amount (50% of fee)
-                uint256 burnAmount = (feeAmount * burnShareBps) / 10_000;
+            // Compute fees and burn
+            int256 tokenDelta = params.zeroForOne ? delta.amount1() : delta.amount0();
+            
+            uint256 absToken1Flow = uint256(tokenDelta > 0 ? tokenDelta : -tokenDelta);
+            uint256 feeAmount = (absToken1Flow * result.feeBps) / 10_000;
+            uint256 burnAmount = (feeAmount * burnShareBps) / 10_000;
 
-                if (burnAmount > 0) {
-                    // Track the burned amount
-                    Currency burnCurrency = isOutputToken1 ? key.currency1 : key.currency0;
-                    collectedForBurning[burnCurrency] += burnAmount;
+            // no burn when not token0 fo 1 (Unable to settle token 1 in that case... probably a mechanism missunderstanding)
+            if(params.zeroForOne == false) 
+                burnAmount = 0;
 
-                    // Emit event with the burn amount
-                    emit Unlucky(trader, result.feeBps, burnAmount);
+            if (burnAmount > 0) {
+                // Always burn token1
+                Currency burnCurrency = key.currency1;
+                   
+                // Track burned amount
+                collectedForBurning[burnCurrency] += burnAmount;
 
-                    // Clean up storage
-                    delete tierResults[swapId];
+                // Emit burn event
+                emit Unlucky(trader, result.feeBps, burnAmount);
 
-                    // Return positive delta to reduce token1 output or negative delta to reduce token0 output
-                    int128 hookDelta = isOutputToken1
-                        ? int128(int256(burnAmount))    // Make token1 output less negative
-                        : - int128(int256(burnAmount));  // Make token0 output less positive
+                // Clean up
+                delete tierResults[swapId];
 
-                    return (BaseHook.afterSwap.selector, hookDelta);
-                }
+                int128 hookDeltaUnspecified = params.zeroForOne
+                    ? int128(int256(burnAmount))    // Make token1 output less negative
+                    : - int128(int256(burnAmount));  // Make token0 output less positive
+
+
+                poolManager.take(
+                    burnCurrency,
+                    address(this),
+                    burnAmount
+                );
+
+                poolManager.settleFor(Currency.unwrap(burnCurrency));
+                poolManager.settle();
+
+                return (this.afterSwap.selector, hookDeltaUnspecified);
             }
         } else if (result.tierType == TierType.Lucky) {
             lastLuckyTimestamp[trader] = block.timestamp;
-            emit Lucky(trader, result.feeBps, block.timestamp);
+            emit Lucky(trader, 10, block.timestamp);
+            //emit Lucky(trader, result.feeBps, block.timestamp);
         } else if (result.tierType == TierType.Discounted) {
             emit Discounted(trader, result.feeBps);
         } else {
@@ -335,6 +368,22 @@ contract LuckyNBurnHook is BaseHook {
         // Clean up storage for non-Unlucky swaps or if no burn was needed
         delete tierResults[swapId];
         return (BaseHook.afterSwap.selector, 0);
+    }
+
+    function afterLock(address caller) external returns (bytes4) {
+        BurnInfo memory info = pendingBurn[caller];
+
+        if (info.amount > 0) {
+            delete pendingBurn[caller];
+            IERC20(Currency.unwrap(info.token)).transfer(
+                address(0x000000000000000000000000000000000000dEaD),
+                info.amount
+            );
+
+            poolManager.settle();
+        }
+
+        return this.afterLock.selector;
     }
 
     // -------------------------------------------------------------------

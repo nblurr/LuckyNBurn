@@ -38,9 +38,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
     LuckyNBurnHook internal hook;
     PoolKey internal poolKey;
 
-    /// @notice The address where burned tokens are sent
-    address public burnAddress;
-
     address internal constant BURN_ADDRESS = address(0xdEaD);
     address internal trader = address(0x1234);
 
@@ -348,6 +345,8 @@ contract TestLuckyNBurnHook is Test, Deployers {
         vm.expectEmit(true, true, false, true);
         emit Unlucky(trader, 100, expectedBurnAmount);
 
+        // TODO: Do a delta of token in Dead address before and after swap 
+
         console.log(""); 
         console.log("--------------------------------");
         console.log("Balances before swap");
@@ -479,6 +478,9 @@ contract TestLuckyNBurnHook is Test, Deployers {
         uint256 initialHookToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(address(hook));
         uint256 initialPoolToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(address(manager));
         uint256 initialPoolToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(address(manager));
+        uint256 initialDeadToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(BURN_ADDRESS);
+        uint256 initialDeadToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(BURN_ADDRESS);
+
         console.log("--------------------------------");
         console.log("Trader Token0:", initialTraderToken0);
         console.log("Trader Token1:", initialTraderToken1);
@@ -486,6 +488,8 @@ contract TestLuckyNBurnHook is Test, Deployers {
         console.log("Pool Token1:", initialPoolToken1);
         console.log("Hook Token0:", initialHookToken0);
         console.log("Hook Token1:", initialHookToken1);
+        console.log("Dead Token0:", initialDeadToken0);
+        console.log("Dead Token1:", initialDeadToken1);
         console.log("--------------------------------");
     }
 

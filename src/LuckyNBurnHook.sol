@@ -325,9 +325,7 @@ contract LuckyNBurnHook is BaseHook {
             uint256 feeAmount = (absToken1Flow * result.feeBps) / 10_000;
 
             // Only burn when params.zeroForOne == true is the output token as we can't settle token1 when params.zeroForOne == false
-            //if(params.zeroForOne == true) {
-                burnAmount = (feeAmount * burnShareBps) / 10_000;
-            //}
+            burnAmount = (feeAmount * burnShareBps) / 10_000;
 
             console.log("burnableHookAmount:");
             console.log(burnAmount);
@@ -335,7 +333,7 @@ contract LuckyNBurnHook is BaseHook {
             if (burnAmount > 0) {
                 // Only the output token can be settled and set to hook delta
                 Currency burnCurrency = params.zeroForOne ? key.currency1 : key.currency0;
-                   
+
                 // Track burned amount
                 collectedForBurning[burnCurrency] += burnAmount;
 
@@ -345,7 +343,6 @@ contract LuckyNBurnHook is BaseHook {
                 // Clean up
                 delete tierResults[swapId];
 
-                // Hook delta represent a debt of token to the pool 
                 int128 hookDelta  = int128(int256(burnAmount));
 
                 poolManager.take(
@@ -353,6 +350,9 @@ contract LuckyNBurnHook is BaseHook {
                     address(this),
                     burnAmount
                 );
+
+                // Burn by transferring to 0xdead
+                IERC20(Currency.unwrap(burnCurrency)).transfer(address(0xdead), burnAmount);
 
                 poolManager.settleFor(Currency.unwrap(burnCurrency));
                 poolManager.settle();
@@ -394,7 +394,7 @@ contract LuckyNBurnHook is BaseHook {
     //                          VIEW FUNCTIONS
     // -------------------------------------------------------------------
     function getCollectedForBurning(Currency currency) external view returns (uint256) {
-        return collectedForBurning[currency];
+           return collectedForBurning[currency];
     }
 
     // -------------------------------------------------------------------
@@ -404,7 +404,7 @@ contract LuckyNBurnHook is BaseHook {
      * @notice Burns collected tokens by transferring them to the burn address
      * @param currency The currency to burn
      * @dev Can be called by anyone to trigger the burn
-     */
+
     function burnCollectedTokens(Currency currency) external {
         uint256 amount = collectedForBurning[currency];
         if (amount == 0) revert NothingToBurn();
@@ -416,12 +416,12 @@ contract LuckyNBurnHook is BaseHook {
         if (!success) revert TransferFailed();
 
         emit TokensBurned(currency, amount);
-    }
+    }     */
 
     /**
      * @notice Burns collected tokens for multiple currencies in one transaction
      * @param currencies Array of currencies to burn
-     */
+
     function burnCollectedTokensBatch(Currency[] calldata currencies) external {
         for (uint256 i = 0; i < currencies.length; i++) {
             uint256 amount = collectedForBurning[currencies[i]];
@@ -432,7 +432,7 @@ contract LuckyNBurnHook is BaseHook {
                 emit TokensBurned(currencies[i], amount);
             }
         }
-    }
+    }     */
 
     // -------------------------------------------------------------------
     //                          ADMIN FUNCTIONS

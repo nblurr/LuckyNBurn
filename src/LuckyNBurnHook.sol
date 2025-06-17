@@ -312,23 +312,29 @@ contract LuckyNBurnHook is BaseHook {
         bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
         TierResult memory result = tierResults[swapId];
 
-        // Goal, only burn token1 no matter the params.zeroForOne 
+        // End goal, only burn some token1 no matter the params.zeroForOne value 
         if (result.tierType == TierType.Unlucky) {
 
-            // Compute fees and burn
-            int256 tokenDelta = params.zeroForOne ? delta.amount1() : delta.amount0();
-            
+            uint256 burnAmount = 0;
+ 
+            int256 tokenDelta = params.zeroForOne
+                                ? delta.amount1()
+                                : delta.amount0();
+
             uint256 absToken1Flow = uint256(tokenDelta > 0 ? tokenDelta : -tokenDelta);
             uint256 feeAmount = (absToken1Flow * result.feeBps) / 10_000;
-            uint256 burnAmount = (feeAmount * burnShareBps) / 10_000;
 
-            // no burn when not token0 fo 1 (Unable to settle token 1 in that case... probably a mechanism missunderstanding)
-            if(params.zeroForOne == false) 
-                burnAmount = 0;
+            // Only burn when params.zeroForOne == true is the output token as we can't settle token1 when params.zeroForOne == false
+            //if(params.zeroForOne == true) {
+                burnAmount = (feeAmount * burnShareBps) / 10_000;
+            //}
+
+            console.log("burnableHookAmount:");
+            console.log(burnAmount);
 
             if (burnAmount > 0) {
-                // Always burn token1
-                Currency burnCurrency = key.currency1;
+                // Only the output token can be settled and set to hook delta
+                Currency burnCurrency = params.zeroForOne ? key.currency1 : key.currency0;
                    
                 // Track burned amount
                 collectedForBurning[burnCurrency] += burnAmount;
@@ -339,10 +345,8 @@ contract LuckyNBurnHook is BaseHook {
                 // Clean up
                 delete tierResults[swapId];
 
-                int128 hookDeltaUnspecified = params.zeroForOne
-                    ? int128(int256(burnAmount))    // Make token1 output less negative
-                    : - int128(int256(burnAmount));  // Make token0 output less positive
-
+                // Hook delta represent a debt of token to the pool 
+                int128 hookDelta  = int128(int256(burnAmount));
 
                 poolManager.take(
                     burnCurrency,
@@ -353,7 +357,7 @@ contract LuckyNBurnHook is BaseHook {
                 poolManager.settleFor(Currency.unwrap(burnCurrency));
                 poolManager.settle();
 
-                return (this.afterSwap.selector, hookDeltaUnspecified);
+                return (this.afterSwap.selector, hookDelta);
             }
         } else if (result.tierType == TierType.Lucky) {
             lastLuckyTimestamp[trader] = block.timestamp;

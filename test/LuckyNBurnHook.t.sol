@@ -344,23 +344,24 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
         // 50% of fee goes to burn (burnShareBps = 5000)
         // Expect the unlucky event with correct burn amount
-        console.log("expectedBurnAmount from expectEmil");
-        console.log(expectedBurnAmount);
+
         vm.expectEmit(true, true, false, true);
         emit Unlucky(trader, 100, expectedBurnAmount);
+
+        console.log(""); 
+        console.log("--------------------------------");
+        console.log("Balances before swap");
+        log_balances();
 
         // Perform swap that should trigger unlucky tier
         _performSwap(trader, keccak256("burn-calculation-test"));
 
-        console.log("//// hook.getCollectedForBurning(key.currency 1 & 0)");
-        console.log(hook.getCollectedForBurning(poolKey.currency1));
-        console.log(hook.getCollectedForBurning(poolKey.currency0));
-
-        console.log("ExpectedBurnAmount");
-        console.log(expectedBurnAmount);
-
-        console.log("poolKey.currency1");
-        console.log(Currency.unwrap(poolKey.currency1));
+        console.log(""); 
+        console.log("--------------------------------");
+        console.log("Balances after swap");
+        log_balances();  
+        console.log(""); 
+        console.log(""); 
 
         // Verify the burn amount was collected
         assertEq(hook.getCollectedForBurning(poolKey.currency1), expectedBurnAmount);
@@ -392,8 +393,20 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertEq(uint8(tierType), 0);
         assertEq(feeBps, 0);
 
+        console.log(""); 
+        console.log("--------------------------------");
+        console.log("Balances before swap");
+        log_balances();  
+
         // After swap, tier result should be cleaned up
         _performSwap(trader, salt);
+
+        console.log(""); 
+        console.log("--------------------------------");
+        console.log("Balances after swap");
+        log_balances();  
+        console.log(""); 
+        console.log(""); 
 
         (tierType, feeBps) = hook.tierResults(swapId);
         assertEq(uint8(tierType), 0);
@@ -453,12 +466,27 @@ contract TestLuckyNBurnHook is Test, Deployers {
         ts = block.timestamp;
         vm.expectEmit(true, true, false, true);
 
-        console.log("expectedBurnAmount from expectEmil");
-        console.log(expectedBurnAmount);
-
         emit Unlucky(trader, 100, expectedBurnAmount); // expectedBurnAmount = 5000000000000000
         _performSwap(trader, keccak256("unlucky"));     
 
+    }
+
+    function log_balances() public {
+        // Get initial balances
+        uint256 initialTraderToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(trader);
+        uint256 initialTraderToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
+        uint256 initialHookToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(address(hook));
+        uint256 initialHookToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(address(hook));
+        uint256 initialPoolToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(address(manager));
+        uint256 initialPoolToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(address(manager));
+        console.log("--------------------------------");
+        console.log("Trader Token0:", initialTraderToken0);
+        console.log("Trader Token1:", initialTraderToken1);
+        console.log("Pool Token0:", initialPoolToken0);
+        console.log("Pool Token1:", initialPoolToken1);
+        console.log("Hook Token0:", initialHookToken0);
+        console.log("Hook Token1:", initialHookToken1);
+        console.log("--------------------------------");
     }
 
     /// @notice Test that randomness produces different results with different salts
@@ -469,14 +497,23 @@ contract TestLuckyNBurnHook is Test, Deployers {
         for (uint256 i = 0; i < 20; i++) {
             bytes32 salt = keccak256(abi.encodePacked("random-test", i));
 
-            console.log("salt test");
-            console.log(i);
+            console.log(""); 
+            console.log("--------------------------------");
+            console.log("Balances before swap");
+            log_balances();
 
             // Alternate direction every few swaps to avoid price limits
             bool zeroForOne = (i % 4) < 2;
             _performSwapAlternating(trader, salt, zeroForOne);
 
             vm.warp(block.timestamp + 2 hours);
+
+            console.log(""); 
+            console.log("--------------------------------");
+            console.log("Balances after swap");
+            log_balances();  
+            console.log(""); 
+            console.log(""); 
         }
     }
 
@@ -485,7 +522,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
         SwapParams memory swapParams = SwapParams({
             zeroForOne: zeroForOne,
-            amountSpecified: -0.001 ether, // Smaller amount to avoid hitting limits
+            amountSpecified: -1 ether, // Smaller amount to avoid hitting limits
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 

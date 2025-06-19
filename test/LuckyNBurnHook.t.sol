@@ -18,6 +18,9 @@ import {ImmutableState} from "../lib/v4-periphery/src/base/ImmutableState.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console} from "forge-std/console.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {Slot0} from "v4-core/types/Slot0.sol";
+import {IExtsload} from "v4-core/interfaces/IExtsload.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 
 contract TestLuckyNBurnHook is Test, Deployers {
     using CurrencyLibrary for Currency;
@@ -38,7 +41,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
     LuckyNBurnHook internal hook;
     PoolKey internal poolKey;
 
-    address internal constant BURN_ADDRESS = address(0xdEaD);
+    address internal constant BURN_ADDRESS = address(0x000000000000000000000000000000000000dEaD);
     address internal trader = address(0x1234);
 
     /// @notice Sets up the test environment for LuckyNBurnHook tests.
@@ -62,6 +65,11 @@ contract TestLuckyNBurnHook is Test, Deployers {
             tickSpacing: 60,
             hooks: IHooks(address(hook))
         });
+
+
+        console.log("SQRT_PRICE_1_1");
+        console.log(SQRT_PRICE_1_1);
+
         manager.initialize(poolKey, SQRT_PRICE_1_1);
 
         // Add initial liquidity to the pool
@@ -69,6 +77,8 @@ contract TestLuckyNBurnHook is Test, Deployers {
         uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
         uint256 token0ToAdd = 10 ether;
         uint256 token1ToAdd = 10 ether;
+
+
         uint128 liquidityDelta = LiquidityAmounts.getLiquidityForAmounts(
             SQRT_PRICE_1_1, // Current price
             sqrtPriceAtTickLower, // Lower price bound
@@ -88,9 +98,22 @@ contract TestLuckyNBurnHook is Test, Deployers {
             ZERO_BYTES
         );
 
+        address pool = address(uint160(uint256(keccak256(abi.encode(poolKey)))));
+        uint256 initialPoolToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(pool);
+        uint256 initialPoolToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(pool);
+
         // Give the trader some tokens
         deal(Currency.unwrap(currency0), trader, 100000 ether);
         deal(Currency.unwrap(currency1), trader, 100000 ether);
+
+        deal(Currency.unwrap(currency0), pool, 100000 ether);
+        deal(Currency.unwrap(currency1), pool, 100000 ether);
+
+        //deal(Currency.unwrap(currency0), address(hook), 100000 ether);
+        //deal(Currency.unwrap(currency1), address(hook), 100000 ether);
+
+        initialPoolToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(pool);
+        initialPoolToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(pool);
 
         // Approve the swap router to spend trader's tokens
         vm.startPrank(trader);
@@ -295,6 +318,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
     /// @notice Test that different users have separate cooldowns
     function test_lucky_cooldown_per_user() public {
         address trader2 = address(0x5678);
+
         deal(Currency.unwrap(currency0), trader2, 100 ether);
         deal(Currency.unwrap(currency1), trader2, 100 ether);
 
@@ -334,36 +358,34 @@ contract TestLuckyNBurnHook is Test, Deployers {
     function test_unlucky_burn_calculation() public {
         // Force unlucky tier
         hook.setChances(0, 0, 0, 10000);
+                          
+        uint256 amountIn = 996702347911456766; // Swap amount
+        uint256 totalFee = (amountIn * 100) / 10_000; // 100 bps = 1%
+        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share = 5000000000000000 wei 50% burn share = 5000000000000000 wei
 
-        uint256 amountIn= 996702347911456766;
-        uint256 totalFee = (amountIn * 100) / 10_000; // 1% fee (unlucky tier)
-        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000;
 
         // 50% of fee goes to burn (burnShareBps = 5000)
-        // Expect the unlucky event with correct burn amount
+        // Expect the unlucky event with corr
+        console.log("expectedBurnAmount ");
+        console.log(expectedBurnAmount);
 
         vm.expectEmit(true, true, false, true);
         emit Unlucky(trader, 100, expectedBurnAmount);
 
-        // TODO: Do a delta of token in Dead address before and after swap 
-
-        console.log(""); 
-        console.log("--------------------------------");
-        console.log("Balances before swap");
-        log_balances();
-
         // Perform swap that should trigger unlucky tier
         _performSwap(trader, keccak256("burn-calculation-test"));
 
-        console.log(""); 
-        console.log("--------------------------------");
-        console.log("Balances after swap");
-        log_balances();  
-        console.log(""); 
-        console.log(""); 
-
         // Verify the burn amount was collected
         assertEq(hook.getCollectedForBurning(poolKey.currency1), expectedBurnAmount);
+
+        //hook.burnAllCurrency();
+        
+        console.log("");
+        console.log("--------------------------------");
+        console.log(" test_unlucky_burn_calculation ");
+        console.log("--------------------------------");
+        console.log("");
+        log_balances();
     }
 
     /// @notice Test that hooks revert when not called by pool manager
@@ -381,7 +403,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         vm.expectRevert(ImmutableState.NotPoolManager.selector);
         hook.afterSwap(address(1), key, params, delta, hookData);
     }
-
+ 
     /// @notice Test tier result storage and cleanup
     function test_tier_result_storage_cleanup() public {
         bytes32 salt = keccak256("storage-test");
@@ -392,20 +414,12 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertEq(uint8(tierType), 0);
         assertEq(feeBps, 0);
 
-        console.log(""); 
-        console.log("--------------------------------");
-        console.log("Balances before swap");
-        log_balances();  
+
 
         // After swap, tier result should be cleaned up
         _performSwap(trader, salt);
 
-        console.log(""); 
-        console.log("--------------------------------");
-        console.log("Balances after swap");
-        log_balances();  
-        console.log(""); 
-        console.log(""); 
+
 
         (tierType, feeBps) = hook.tierResults(swapId);
         assertEq(uint8(tierType), 0);
@@ -456,9 +470,13 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share = 5000000000000000 wei 50% burn share = 5000000000000000 wei
 
  
-        uint256 amountIn= 994919098418487499;
-        uint256 totalFee = (amountIn * 100) / 10_000; // 1% fee (unlucky tier)
-        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000;
+        //uint256 amountIn= 9919337888196834;
+        //uint256 totalFee = (amountIn * 100) / 10_000; // 1% fee (unlucky tier)
+        // NOTE: Uniswap V4 sqrtpriceX96 slot0 lead us to calculate price based on sqrtpriceX96 limit and messup calculations
+        uint256 amountIn = 994919098418487499; // Swap amount
+        uint256 totalFee = (amountIn * 100) / 10_000; // 100 bps = 1%
+        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share = 5000000000000000 wei 50% burn share = 5000000000000000 wei
+
 
         hook.setChances(0, 0, 0, 10000);
         vm.warp(ts + 2 hours);
@@ -498,26 +516,33 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Temporarily set lucky chance to 0 to avoid cooldown issues
         hook.setChances(0, 4000, 5000, 1000); // No lucky tier
 
+
+        console.log("");
+        console.log("--------------------------------");
+        console.log(" INIT test_randomness_with_different_salts ");
+        console.log("--------------------------------");
+        console.log("");
+        log_balances();
+        console.log("");
+
         for (uint256 i = 0; i < 20; i++) {
             bytes32 salt = keccak256(abi.encodePacked("random-test", i));
 
-            console.log(""); 
-            console.log("--------------------------------");
-            console.log("Balances before swap");
-            log_balances();
 
             // Alternate direction every few swaps to avoid price limits
             bool zeroForOne = (i % 4) < 2;
             _performSwapAlternating(trader, salt, zeroForOne);
+            // hook.burnAllCurrency();
+
+            console.log("");
+            console.log("--------------------------------");
+            console.log(" test_randomness_with_different_salts ");
+            console.log("--------------------------------");
+            console.log("");
+            log_balances();
 
             vm.warp(block.timestamp + 2 hours);
 
-            console.log(""); 
-            console.log("--------------------------------");
-            console.log("Balances after swap");
-            log_balances();  
-            console.log(""); 
-            console.log(""); 
         }
     }
 

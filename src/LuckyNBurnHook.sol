@@ -11,6 +11,7 @@ pragma solidity ^0.8.26;
 
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {Pool} from "v4-core/libraries/Pool.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
@@ -19,7 +20,11 @@ import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/types/BeforeSwapDelta.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console} from "forge-std/console.sol";
+import "forge-std/console.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {Slot0} from "v4-core/types/Slot0.sol";
+import {IExtsload} from "v4-core/interfaces/IExtsload.sol";
+
 
 contract LuckyNBurnHook is BaseHook {
     // -------------------------------------------------------------------
@@ -74,6 +79,10 @@ contract LuckyNBurnHook is BaseHook {
 
     /// @notice Emitted when tokens are burned
     event TokensBurned(Currency indexed currency, uint256 amount);
+
+    event DebugBytes32(bytes32 value);
+    event DebugUint(uint256 value);
+
 
     // -------------------------------------------------------------------
     //                             STRUCTS & ENUMS
@@ -153,6 +162,12 @@ contract LuckyNBurnHook is BaseHook {
     /// @notice Tracks tokens collected for burning by currency
     mapping(Currency => uint256) public collectedForBurning;
 
+    Currency[] public allCurrencies;
+    mapping(Currency => bool) public isTrackedCurrency;
+
+    //Currency public alwaysBurnThisCurrency;
+
+
     // -------------------------------------------------------------------
     //                          CONSTRUCTOR
     // -------------------------------------------------------------------
@@ -174,11 +189,12 @@ contract LuckyNBurnHook is BaseHook {
         // Default burn configuration
         burnAddress = 0x000000000000000000000000000000000000dEaD; // Burn address
         burnShareBps = 5000; // 50% of unlucky fees go toward burn calculation
+        
+
+
+        //alwaysBurnThisCurrency = _poolManager.currency1;
     }
 
-    // -------------------------------------------------------------------
-    //                          PERMISSIONS
-    // -------------------------------------------------------------------
 
     /**
      * @notice Returns the hook permissions required by this contract
@@ -257,7 +273,7 @@ contract LuckyNBurnHook is BaseHook {
     // -------------------------------------------------------------------
     //                          HOOK IMPLEMENTATION
     // -------------------------------------------------------------------
-
+uint160 public sqrtPriceLimitX96;
     /**
      * @notice Hook called before a swap executes
      * @param hookData Encoded trader and salt for tier selection
@@ -266,11 +282,13 @@ contract LuckyNBurnHook is BaseHook {
      * @return fee The dynamic fee for this swap
      * @dev Selects a random tier for the swap and stores the result
      */
-    function _beforeSwap(address, PoolKey calldata, SwapParams calldata, bytes calldata hookData)
+    function _beforeSwap(address, PoolKey calldata key, SwapParams calldata callData, bytes calldata hookData)
     internal
     override
     returns (bytes4, BeforeSwapDelta, uint24)
     {
+        sqrtPriceLimitX96 = callData.sqrtPriceLimitX96;
+
         (address trader, bytes32 salt) = abi.decode(hookData, (address, bytes32));
         uint16 roll = _getRoll(trader, salt);
         (TierType tier, uint16 feeBps) = _selectTier(roll);
@@ -290,6 +308,43 @@ contract LuckyNBurnHook is BaseHook {
         uint256 amount;
     }
     mapping(address => BurnInfo) public pendingBurn;
+
+
+function calculateBurnAmount(
+    SwapParams calldata params,
+    TierResult memory result
+) internal view returns (uint256) {
+
+}
+
+    function log_balances(address trader, PoolKey calldata key) public {
+
+        address pool = address(uint160(uint256(keccak256(abi.encode(key)))));
+        // Get initial balances
+        uint256 initialTraderToken0 = IERC20(Currency.unwrap(key.currency0)).balanceOf(trader);
+        uint256 initialTraderToken1 = IERC20(Currency.unwrap(key.currency1)).balanceOf(trader);
+        uint256 initialHookToken0 = IERC20(Currency.unwrap(key.currency0)).balanceOf(address(this));
+        uint256 initialHookToken1 = IERC20(Currency.unwrap(key.currency1)).balanceOf(address(this));
+        uint256 initialPoolToken0 = IERC20(Currency.unwrap(key.currency0)).balanceOf(pool);
+        uint256 initialPoolToken1 = IERC20(Currency.unwrap(key.currency1)).balanceOf(pool);
+        uint256 initialDeadToken0 = IERC20(Currency.unwrap(key.currency0)).balanceOf(address(burnAddress));
+        uint256 initialDeadToken1 = IERC20(Currency.unwrap(key.currency1)).balanceOf(address(burnAddress));
+
+        console.log("");
+        
+        console.log("Trader Token0:", initialTraderToken0);
+        console.log("Trader Token1:", initialTraderToken1);
+        console.log("Pool Token0:", initialPoolToken0);
+        console.log("Pool Token1:", initialPoolToken1);
+        // console.log("Hook Token0:", initialHookToken0);
+        // console.log("Hook Token1:", initialHookToken1);
+        console.log("Dead Token0:", initialDeadToken0);
+        console.log("Dead Token1:", initialDeadToken1);
+        console.log("--------------------------------");
+
+        console.log("");
+    }
+
 
     /**
      * @notice Hook called after a swap executes to process fees and rewards
@@ -312,53 +367,68 @@ contract LuckyNBurnHook is BaseHook {
         bytes32 swapId = keccak256(abi.encodePacked(trader, salt));
         TierResult memory result = tierResults[swapId];
 
+
         // End goal, only burn some token1 no matter the params.zeroForOne value 
         if (result.tierType == TierType.Unlucky) {
 
+            console.log("***********************");
+            console.log("       UNLUCKY        ");
+            console.log("***********************");
             uint256 burnAmount = 0;
  
             int256 tokenDelta = params.zeroForOne
                                 ? delta.amount1()
                                 : delta.amount0();
+            
+            console.log("tokenDelta");
+            console.log(tokenDelta);
 
             uint256 absToken1Flow = uint256(tokenDelta > 0 ? tokenDelta : -tokenDelta);
             uint256 feeAmount = (absToken1Flow * result.feeBps) / 10_000;
 
             // Only burn when params.zeroForOne == true is the output token as we can't settle token1 when params.zeroForOne == false
             burnAmount = (feeAmount * burnShareBps) / 10_000;
+            // Only the output token can be settled and set to hook delta
+            Currency burnCurrency = params.zeroForOne ? key.currency1 : key.currency0;
+            
+            // Track burned amount
+            collectedForBurning[burnCurrency] += burnAmount;
+            if (!isTrackedCurrency[burnCurrency]) {
+                isTrackedCurrency[burnCurrency] = true;
+                allCurrencies.push(burnCurrency);
+            }
 
-            console.log("burnableHookAmount:");
+            console.log("zeroForOne");
+            console.log(params.zeroForOne);
+
+            console.log("Emitted hook burnAmount ");
+            console.log(burnAmount);
+            
+            // Emit burn event
+            emit Unlucky(trader, result.feeBps, burnAmount);
+
+            // Clean up
+            delete tierResults[swapId];
+
+            int128 hookDelta  = int128(int256(burnAmount));
+
+            poolManager.take(
+                burnCurrency,
+                address(this),
+                burnAmount
+            );
+
+            // Send to death / burn
+            bool success = IERC20(Currency.unwrap(burnCurrency)).transfer(burnAddress, burnAmount);
+
+            console.log("Hook calculated burn");
             console.log(burnAmount);
 
-            if (burnAmount > 0) {
-                // Only the output token can be settled and set to hook delta
-                Currency burnCurrency = params.zeroForOne ? key.currency1 : key.currency0;
+            console.log("Hook delta");
+            console.log(hookDelta);
 
-                // Track burned amount
-                collectedForBurning[burnCurrency] += burnAmount;
-
-                // Emit burn event
-                emit Unlucky(trader, result.feeBps, burnAmount);
-
-                // Clean up
-                delete tierResults[swapId];
-
-                int128 hookDelta  = int128(int256(burnAmount));
-
-                poolManager.take(
-                    burnCurrency,
-                    address(this),
-                    burnAmount
-                );
-
-                // Burn by transferring to 0xdead
-                IERC20(Currency.unwrap(burnCurrency)).transfer(address(0xdead), burnAmount);
-
-                poolManager.settleFor(Currency.unwrap(burnCurrency));
-                poolManager.settle();
-
-                return (this.afterSwap.selector, hookDelta);
-            }
+            return (this.afterSwap.selector, hookDelta);
+        
         } else if (result.tierType == TierType.Lucky) {
             lastLuckyTimestamp[trader] = block.timestamp;
             emit Lucky(trader, 10, block.timestamp);
@@ -404,35 +474,87 @@ contract LuckyNBurnHook is BaseHook {
      * @notice Burns collected tokens by transferring them to the burn address
      * @param currency The currency to burn
      * @dev Can be called by anyone to trigger the burn
-
+    **/
+    /*
     function burnCollectedTokens(Currency currency) external {
         uint256 amount = collectedForBurning[currency];
         if (amount == 0) revert NothingToBurn();
 
         collectedForBurning[currency] = 0;
 
-        // Transfer tokens to burn address
+        // Transfer tokens to burn address      
         bool success = IERC20(Currency.unwrap(currency)).transfer(burnAddress, amount);
         if (!success) revert TransferFailed();
 
         emit TokensBurned(currency, amount);
-    }     */
+    }
+    */
+
+
 
     /**
      * @notice Burns collected tokens for multiple currencies in one transaction
      * @param currencies Array of currencies to burn
-
+     */
+     /*
     function burnCollectedTokensBatch(Currency[] calldata currencies) external {
         for (uint256 i = 0; i < currencies.length; i++) {
             uint256 amount = collectedForBurning[currencies[i]];
             if (amount > 0) {
                 collectedForBurning[currencies[i]] = 0;
+                
                 bool success = IERC20(Currency.unwrap(currencies[i])).transfer(burnAddress, amount);
                 if (!success) revert TransferFailed();
                 emit TokensBurned(currencies[i], amount);
             }
         }
-    }     */
+    }
+    */
+    /*
+    function burnAllCurrency() external {
+        uint256 len = allCurrencies.length;
+        for (uint256 i = 0; i < len; i++) {
+            Currency currency = allCurrencies[i];
+            uint256 amount = collectedForBurning[currency];
+            if (amount > 0) {
+
+                /* Would have been great to swap eth for token and burn... I think there is no way to do so from hooks... 
+                   ** So let's burn some eth **
+                if(Currency.unwrap(currency) != Currency.unwrap(alwaysBurnThisCurrency)){
+                    IERC20(Currency.unwrap(currency)).approve(address(swapRouter), type(uint256).max);
+                    IERC20(Currency.unwrap(alwaysBurnThisCurrency)).approve(address(swapRouter), type(uint256).max); 
+
+                    address[] memory path = new address[](2);
+                    path[0] = Currency.unwrap(currency);
+                    path[1] = Currency.unwrap(alwaysBurnThisCurrency);
+
+                    uint256[] memory amounts = router.swapExactTokensForTokens(
+                        amount,
+                        minAmountOut, // set appropriately
+                        path,
+                        address(this),
+                        block.timestamp
+                    );     
+
+                    // once swapped = burn !
+                    bool success = IERC20(Currency.unwrap(currency)).transfer(burnAddress, amount);
+                    if (!success) revert TransferFailed();
+
+                    emit TokensBurned(currency, amount);              
+                } else {
+                */
+                    //collectedForBurning[currency] = 0;
+                    //bool success = IERC20(Currency.unwrap(currency)).transfer(burnAddress, amount);
+                    //if (!success) revert TransferFailed();
+
+                   // emit TokensBurned(currency, amount);
+                // }
+
+/*
+            }
+        }
+    }
+*/
 
     // -------------------------------------------------------------------
     //                          ADMIN FUNCTIONS

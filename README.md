@@ -1,125 +1,203 @@
-# LuckyNBurn: A Gamified Uniswap v4 Hook
+# 🎰 LuckyNBurnHook – Gamified Uniswap v4 Hook with Dynamic Fees and Token Burning
 
-You might get lucky… or pay the price to fuel the fire. LuckyNBurn is a lightweight, gamified Uniswap v4 hook that makes swap fees unpredictable — turning every trade into a roll of the dice. Most users get the usual rate, some get rewarded with a discount… and a few unlucky ones pay a higher fee that is partially burned.
-
----
-
-### **Development Plan**
-
-This document outlines the strategic phases to architect, build, test, and deploy the `LuckyNBurn` hook.
-
-#### **Phase 1: Foundation & Project Setup**
-
-1.  **Setup Development Environment:**
-    *   **Install Foundry:** Use `foundryup` to get the latest `forge`, `cast`, and `anvil` toolchain.
-    *   **Initialize Project:** `forge init LuckyNBurn`
-    *   **Navigate to Project:** `cd LuckyNBurn`
-
-2.  **Install Dependencies:**
-    *   **Uniswap v4 Core:** `forge install uniswap/v4-core`
-    *   **Solmate:** `forge install Rari-Capital/solmate` for gas-optimized primitives.
-
-3.  **Contract Scaffolding:**
-    *   Create `src/LuckyNBurnHook.sol`.
-    *   The contract will inherit from `BaseHook` and `ReentrancyGuard`.
-    *   Define `IUniswapV4PoolManager public immutable POOL_MANAGER;`.
-    *   The `constructor` will set the `POOL_MANAGER` address.
+**LuckyNBurnHook** is a custom [Uniswap v4 hook](https://github.com/Uniswap/v4-core) that introduces a **gamified fee structure** with burn mechanics. Each swap has a randomized chance of being categorized into one of four tiers: **Lucky**, **Discounted**, **Normal**, or **Unlucky**. Depending on the outcome, the fee varies, and part of the fee may be burned (destroyed forever 🔥).
 
 ---
 
-#### **Phase 2: Core Logic & The "Dice Roll"**
+## ✨ Features
 
-1.  **State Variables & Intelligent Configuration:**
-    *   `owner`: An `address` for contract administration.
-    *   **Tier Parameters (Basis Points):**
-        *   `luckyChanceBps`: `uint16` (e.g., `1000` for 10.00%).
-        *   `unluckyChanceBps`: `uint16` (e.g., `500` for 5.00%).
-        *   `luckyFeeDiscountBps`: `uint16` (e.g., `5000` for a 50% discount).
-        *   `unluckyFeeSurchargeBps`: `uint16` (e.g., `10000` for a 100% surcharge).
-    *   **Burn Mechanism:**
-        *   `burnAddress`: `address` (e.g., `0x000...0dEaD`).
-        *   `burnFeeShareBps`: `uint16` - Percentage of surcharge to burn (e.g., `2500` for 25%).
-    *   **Anti-Abuse Feature:**
-        *   `traderCooldown`: `mapping(address => uint256) public lastLuckyTimestamp;`.
-        *   `cooldownPeriod`: `uint256` (e.g., `1 hour`).
-
-2.  **On-Chain Randomness Engine:**
-    *   Internal function `_getRoll(address trader, bytes32 salt) returns (uint16)`.
-    *   Uses a `keccak256` hash of `block.timestamp`, `msg.sender`, `blockhash(block.number - 1)`, etc., for pseudo-randomness.
-
-3.  **Primary Hook Implementation (`beforeSwap`):**
-    *   Called by the Pool Manager before a swap.
-    *   Contains the tier selection logic based on the `_getRoll()` result.
-    *   Returns the `afterSwap` selector (`this.afterSwap.selector`) to trigger the fee settlement logic.
+- 🎲 **Randomized Fee Tiers**: Each swap randomly lands in a fee tier with defined probabilities.
+- 🧊 **Lucky Swaps**: Pay the lowest fees (with cooldown).
+- 💸 **Discounted & Normal Swaps**: Reduced or standard LP fees.
+- 🔥 **Unlucky Swaps**: Highest fees, with a portion sent to a burn address.
+- 🔁 **Cooldown Logic**: Prevents spam lucky wins.
+- 🔍 **Full Transparency**: Events emitted for each swap tier and burn.
+- ⚙️ **Customizable**: Owner can adjust fee tiers, cooldowns, and burn settings.
 
 ---
 
-#### **Phase 3: Fee Mechanics & The Burn**
+## 📁 Project Structure
 
-1.  **Fee & Burn Settlement (`afterSwap`):**
-    *   Called after the swap is complete.
-    *   **Unlucky Path:** Calculates and takes the surcharge from the user, then splits it between the burn address and the hook's treasury (to fund lucky rewards).
-    *   **Lucky Path:** Calculates the discount, verifies the trader is not on cooldown, and sends the rebate from the hook's treasury to the user. Updates the user's `lastLuckyTimestamp`.
-
----
-
-#### **Phase 4: Administration & Security**
-
-1.  **Owner-Only Functions:**
-    *   Implement an `onlyOwner` modifier.
-    *   Create setters for all configurable parameters (`setChances`, `setFeeModifiers`, etc.).
-    *   Include a `recoverFunds` function to withdraw excess funds.
-
-2.  **Security Best Practices:**
-    *   **Re-entrancy:** Apply `nonReentrant` modifier to external functions.
-    *   **Input Validation:** Ensure setters validate inputs.
-    *   **Access Control:** Rigorously apply `onlyOwner` and `onlyPoolManager` checks.
-    *   **Economic Modeling:** Ensure the fee/reward structure is sustainable.
+This repo includes:
+- `LuckyNBurnHook.sol` – the main hook smart contract
+- Uses `v4-core` and `v4-periphery` dependencies from Uniswap
+- Designed for testing and educational purposes
 
 ---
 
-#### **Phase 5: Testing & Deployment**
+## 🛠️ Requirements
 
-1.  **Local Testing with Foundry:**
-    *   Write a comprehensive test suite covering all paths (Lucky, Unlucky, Normal).
-    *   Test all calculations, cooldowns, and admin functions.
-    *   Use Foundry's cheatcodes (`vm.prank`, `vm.expectEmit`) to simulate interactions.
+- **Foundry** (for compiling, testing, and deploying)  
+  📦 Install via: https://book.getfoundry.sh/getting-started/installation
 
-2.  **Deployment:**
-    *   Develop a `forge script` for repeatable deployments.
-    *   Deploy to a testnet for live integration testing.
-    *   **A professional security audit is required before mainnet.**
-    *   Deploy to mainnet and engage with the community.
+- **Uniswap v4 dependencies**  
+  You must clone both `v4-core` and `v4-periphery` locally or include them as submodules or git dependencies.
 
-# Default Configuration for LuckyNBurnHook
-# These values are used for the deployment script and can be overridden for each pool.
+---
 
-# -- Tier 1: Lucky --
-# Chance in Basis Points (1000 = 10%)
-LUCKY_TIER_CHANCE_BPS=1000
-# Total Fee in Basis Points (10 = 0.1%)
-LUCKY_TIER_FEE_BPS=10
+## 🚀 Setup & Deployment
 
-# -- Tier 2: Discounted --
-# Chance in Basis Points (3000 = 30%)
-DISCOUNTED_TIER_CHANCE_BPS=3000
-# Total Fee in Basis Points (25 = 0.25%)
-DISCOUNTED_TIER_FEE_BPS=25
+### 1. Clone & Install
 
-# -- Tier 3: Normal --
-# Chance in Basis Points (5000 = 50%)
-NORMAL_TIER_CHANCE_BPS=5000
-# Total Fee in Basis Points (50 = 0.5%)
-NORMAL_TIER_FEE_BPS=50
+```bash
+git clone https://github.com/YOUR_USERNAME/luckynburn-hook.git
+cd luckynburn-hook
 
-# -- Tier 4: Unlucky --
-# Chance in Basis Points (1000 = 10%)
-UNLUCKY_TIER_CHANCE_BPS=1000
-# Total Fee in Basis Points (100 = 1.0%)
-UNLUCKY_TIER_FEE_BPS=100
+# Initialize Foundry project if not already
+forge init
 
-# -- Fee Distribution --
-# The address where the burned portion of fees will be sent. 0x...dEaD is a common convention.
-BURN_ADDRESS=0x000000000000000000000000000000000000dEaD
-# The share of the *total* fee that is burned, in Basis Points (5000 = 50%)
-BURN_SHARE_BPS=5000
+# Add dependencies
+forge install Uniswap/v4-core
+forge install Uniswap/v4-periphery
+forge install OpenZeppelin/openzeppelin-contracts
+```
+
+### 2. Compile
+
+```bash
+forge build
+```
+
+### 3. Test
+
+```bash
+forge test -vvv
+```
+
+---
+
+## 🧪 Tier Mechanics
+
+Each swap is assigned to a fee tier based on random chance:
+
+| Tier       | Chance (default) | Fee Addition (bps) | Description                          |
+|------------|------------------|--------------------|--------------------------------------|
+| **Lucky**      | 10%              | 0 bps               | Cooldown-based freebie               |
+| **Discounted** | 30%              | 25 bps              | Slightly reduced fee                 |
+| **Normal**     | 50%              | 50 bps              | Standard fee                         |
+| **Unlucky**    | 10%              | 100 bps             | Highest fee; 50% burned 🔥           |
+
+> 🧠 Base fee is **0.3% (3000 pips)** and tier fee is added dynamically on top.
+
+---
+
+## 🧯 Burn Logic
+
+- Only **Unlucky swaps** trigger token burning.
+- The fee is split: part goes to LPs, and the other part is sent to the burn address.
+- Default burn address: `0x000000000000000000000000000000000000dEaD`
+
+---
+
+## 🔧 Admin Functions
+
+The contract owner (deployer) can adjust:
+
+- `setChances`: Tier probabilities (must sum to 10,000)
+- `setFees`: Basis points added per tier
+- `setCooldownPeriod`: Cooldown for Lucky rewards
+- `setBurnConfig`: Burn address and burn share
+
+---
+
+## 🏗️ Create a Pool, Attach the Hook & Provide Liquidity
+
+Below is a quick guide to deploy your pool and become a believer by adding liquidity.
+
+### 1. Deploy the Hook
+
+After deploying Uniswap v4 core contracts, deploy `LuckyNBurnHook` with the `PoolManager` address:
+
+```solidity
+new LuckyNBurnHook(poolManagerAddress)
+```
+
+> This returns your hook address, e.g., `0x123...abc`
+
+### 2. Encode the Hook into the PoolId
+
+When creating a new pool, encode the hook into the `PoolId` using Uniswap's helper:
+
+```solidity
+PoolKey memory key = PoolKey({
+  currency0: Currency.wrap(address(token0)),
+  currency1: Currency.wrap(address(token1)),
+  fee: 3000, // base 0.3% fee
+  tickSpacing: 60,
+  hooks: address(luckyNBurnHook) // Your deployed hook
+});
+```
+
+Then compute the PoolId:
+
+```solidity
+bytes32 poolId = PoolIdLibrary.toId(key);
+```
+
+### 3. Initialize the Pool
+
+Use the `PoolManager` to initialize your pool with a square root price (encoded as sqrtPriceX96):
+
+```solidity
+poolManager.initialize(key, sqrtPriceX96);
+```
+
+### 4. Provide LP as a Believer
+
+Choose your tick range and desired liquidity amount, then provide LP like this:
+
+```solidity
+poolManager.lock(
+    address(this), 
+    abi.encodeWithSelector(
+        IPoolManager.modifyPosition.selector,
+        key,
+        IPoolManager.ModifyPositionParams({
+            tickLower: -600,
+            tickUpper: 600,
+            liquidityDelta: int128(1e18)
+        }),
+        ""
+    )
+);
+```
+
+This effectively adds liquidity to the pool. You are now a **LuckyNBurn LP believer** ✊🔥
+
+---
+
+## 🧠 Tips & Debug
+
+- Use `hookData = abi.encode(trader, salt)` for swaps to ensure randomness works as intended.
+- The hook supports `log_balances()` to debug token flows from the pool, hook, trader, and burn address.
+- You can view `collectedForBurning(currency)` for real-time insight into burn amounts per token.
+
+---
+
+## 📊 Events
+
+The contract emits:
+
+- `Lucky`, `Discounted`, `Normal`, `Unlucky`
+- `TokensBurned`
+- `SetChances`, `SetFees`, `SetBurnConfig`, `SetCooldown`
+
+Use these to power a gamified frontend!
+
+---
+
+## ⚠️ Disclaimer
+
+This hook uses **pseudo-randomness** (e.g., blockhash, timestamp) and is **not safe for mainnet production**. Intended for experimental or educational use. Use real randomness (e.g., Chainlink VRF) for production.
+
+---
+
+## 🧠 Why This Matters
+
+The LuckyNBurnHook brings life and randomness into Uniswap swaps. It rewards traders, punishes greed, and creates deflation through burns. It’s a new way to **gamify liquidity**, **encourage interaction**, and **inject excitement** into DeFi.
+
+---
+
+## 📝 License
+
+GNU GENERAL PUBLIC LICENSE © 2024

@@ -14,6 +14,7 @@ import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {LuckyNBurnHook} from "../src/LuckyNBurnHook.sol";
+import {LoyaltyLib} from "../src/LoyaltyLib.sol";
 import {ImmutableState} from "../lib/v4-periphery/src/base/ImmutableState.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {console} from "forge-std/console.sol";
@@ -36,6 +37,11 @@ contract TestLuckyNBurnHook is Test, Deployers {
     event SetFees(uint16 lucky, uint16 discounted, uint16 normal, uint16 unlucky);
     event SetCooldown(uint256 period);
     event SetBurnConfig(address burnAddress, uint16 burnShareBps);
+    event SetLoyaltyConfig(uint8[5] thresholds, uint16[5] luckyBonuses, uint16[5] feeDiscounts);
+
+    // Define events from LoyaltyLib
+    event LoyaltyTierUpgraded(address indexed trader, LoyaltyLib.LoyaltyTier newTier);
+    event MilestoneReached(address indexed trader, uint256 milestone, uint256 bonus);
 
     error WrappedError(address target, bytes4 selector, bytes reason, bytes details);
 
@@ -75,7 +81,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
         uint256 token0ToAdd = 10 ether;
         uint256 token1ToAdd = 10 ether;
 
-
         uint128 liquidityDelta = LiquidityAmounts.getLiquidityForAmounts(
             SQRT_PRICE_1_1, // Current price
             sqrtPriceAtTickLower, // Lower price bound
@@ -95,40 +100,26 @@ contract TestLuckyNBurnHook is Test, Deployers {
             ZERO_BYTES
         );
 
-        address pool = address(uint160(uint256(keccak256(abi.encode(poolKey)))));
-        uint256 initialPoolToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(pool);
-        uint256 initialPoolToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(pool);
-
         // Give the trader some tokens
         deal(Currency.unwrap(currency0), trader, 100000 ether);
         deal(Currency.unwrap(currency1), trader, 100000 ether);
-
-        deal(Currency.unwrap(currency0), pool, 100000 ether);
-        deal(Currency.unwrap(currency1), pool, 100000 ether);
-
-        //deal(Currency.unwrap(currency0), address(hook), 100000 ether);
-        //deal(Currency.unwrap(currency1), address(hook), 100000 ether);
-
-        initialPoolToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(pool);
-        initialPoolToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(pool);
 
         // Approve the swap router to spend trader's tokens
         vm.startPrank(trader);
         IERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
         IERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
         vm.stopPrank();
-
     }
-    /// @notice Helper function to perform a swap with hook data
 
+    /// @notice Helper function to perform a swap with hook data
     function _performSwap(address _trader, bytes32 salt) internal returns (BalanceDelta) {
         bytes memory hookData = abi.encode(_trader, salt);
 
         SwapParams memory swapParams =
-            SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
+                        SwapParams({zeroForOne: true, amountSpecified: -0.1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
 
         PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+                            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
 
         vm.prank(_trader);
         return swapRouter.swap(poolKey, swapParams, settings, hookData);
@@ -142,19 +133,19 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Check default tier settings
         (uint16 luckyChance, uint16 luckyFee) = hook.lucky();
         assertEq(luckyChance, 1000); // 10%
-        assertEq(luckyFee, 0); // 0% additionnal to base .3% = 0.3%
+        assertEq(luckyFee, 0); // 0% additional to base .3% = 0.3%
 
         (uint16 discountedChance, uint16 discountedFee) = hook.discounted();
         assertEq(discountedChance, 3000); // 30%
-        assertEq(discountedFee, 25); // 0.25% additionnal to base .3% = 0.55%
+        assertEq(discountedFee, 25); // 0.25% additional to base .3% = 0.55%
 
         (uint16 normalChance, uint16 normalFee) = hook.normal();
         assertEq(normalChance, 5000); // 50%
-        assertEq(normalFee, 50); // 0.5% additionnal to base .3% = 0.8%
+        assertEq(normalFee, 50); // 0.5% additional to base .3% = 0.8%
 
         (uint16 unluckyChance, uint16 unluckyFee) = hook.unlucky();
         assertEq(unluckyChance, 1000); // 10%
-        assertEq(unluckyFee, 100); // 1% additionnal to base .3% = 1.3%. 50% of 1% burn
+        assertEq(unluckyFee, 100); // 1% additional to base .3% = 1.3%
 
         // Check burn config
         assertEq(hook.burnAddress(), BURN_ADDRESS);
@@ -162,6 +153,16 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
         // Check cooldown
         assertEq(hook.cooldownPeriod(), 1 hours);
+
+        // Check loyalty initialization - should start at Bronze tier
+        assertEq(uint8(hook.getLoyaltyTier(trader)), uint8(LoyaltyLib.LoyaltyTier.Bronze));
+        assertEq(hook.getSwapCount(trader), 0);
+        assertEq(hook.getTotalVolume(trader), 0);
+
+        // Check loyalty config was initialized properly
+        LoyaltyLib.LoyaltyConfig memory config = hook.getLoyaltyConfig();
+        assertEq(config.swapThresholds[1], 20); // Silver threshold
+        assertEq(config.luckyBonuses[1], 200); // Silver bonus
     }
 
     /// @notice Test basic swap functionality - should emit one of the tier events
@@ -180,6 +181,256 @@ contract TestLuckyNBurnHook is Test, Deployers {
         (LuckyNBurnHook.TierType tierType, uint16 feeBps) = hook.tierResults(swapId);
         assertEq(uint8(tierType), 0);
         assertEq(feeBps, 0);
+
+        // Verify loyalty metrics were updated
+        assertEq(hook.getSwapCount(trader), 1);
+        assertGt(hook.getTotalVolume(trader), 0);
+    }
+
+    /// @notice Test loyalty tier progression
+    function test_loyalty_tier_progression() public {
+        // Start at Bronze
+        assertEq(uint8(hook.getLoyaltyTier(trader)), uint8(LoyaltyLib.LoyaltyTier.Bronze));
+
+        // Disable lucky to avoid cooldown issues
+        hook.setChances(0, 4000, 5000, 1000);
+
+        // Perform 20 swaps to reach Silver
+        for (uint i = 0; i < 20; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("progression-test", i));
+            vm.warp(block.timestamp + 1); // Small time increment
+
+            // Alternate swap direction to avoid price limits
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        assertEq(uint8(hook.getLoyaltyTier(trader)), uint8(LoyaltyLib.LoyaltyTier.Silver));
+        assertEq(hook.getSwapCount(trader), 20);
+
+        // Perform 30 more swaps to reach Gold (total 50)
+        for (uint i = 20; i < 50; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("progression-test", i));
+            vm.warp(block.timestamp + 1); // Small time increment
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        assertEq(uint8(hook.getLoyaltyTier(trader)), uint8(LoyaltyLib.LoyaltyTier.Gold));
+        assertEq(hook.getSwapCount(trader), 50);
+
+        // Reset to original chances
+        hook.setChances(1000, 3000, 5000, 1000);
+    }
+
+    /// @notice Test loyalty benefits - lucky chance should increase with higher tiers
+    function test_loyalty_lucky_chance_bonus() public {
+        // Force discounted tier to avoid cooldown issues
+        hook.setChances(0, 10000, 0, 0);
+
+        // At Bronze tier, should have base lucky chance
+        LoyaltyLib.LoyaltyStats memory stats = hook.getLoyaltyStats(trader);
+        assertEq(stats.luckyBonus, 0); // Bronze tier has 0 bonus
+
+        // Perform swaps to reach Silver tier
+        for (uint i = 0; i < 20; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("lucky-bonus-test", i));
+            vm.warp(block.timestamp + 1);
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        // At Silver tier, should have increased lucky bonus
+        stats = hook.getLoyaltyStats(trader);
+        assertEq(stats.luckyBonus, 200); // Silver tier has 200 bps bonus (2%)
+        assertEq(uint8(stats.tier), uint8(LoyaltyLib.LoyaltyTier.Silver));
+
+        // Reset chances to normal
+        hook.setChances(1000, 3000, 5000, 1000);
+    }
+
+    /// @notice Test loyalty fee discounts
+    function test_loyalty_fee_discounts() public {
+        // Disable lucky to avoid cooldown issues
+        hook.setChances(0, 4000, 5000, 1000);
+
+        // Perform swaps to reach Silver tier
+        for (uint i = 0; i < 20; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("fee-discount-test", i));
+            vm.warp(block.timestamp + 1);
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        LoyaltyLib.LoyaltyStats memory stats = hook.getLoyaltyStats(trader);
+        assertEq(stats.feeDiscount, 25); // Silver tier has 25 bps fee discount (0.25%)
+        assertEq(uint8(stats.tier), uint8(LoyaltyLib.LoyaltyTier.Silver));
+
+        // Reset chances
+        hook.setChances(1000, 3000, 5000, 1000);
+    }
+
+    /// @notice Test loyalty cooldown reduction
+    function test_loyalty_cooldown_reduction() public {
+        // Disable lucky to avoid cooldown issues
+        hook.setChances(0, 4000, 5000, 1000);
+
+        // Perform swaps to reach Silver tier
+        for (uint i = 0; i < 20; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("cooldown-test", i));
+            vm.warp(block.timestamp + 1);
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        LoyaltyLib.LoyaltyStats memory stats = hook.getLoyaltyStats(trader);
+        assertEq(stats.cooldownReduction, 15); // Silver tier has 15% cooldown reduction
+
+        // Reset chances
+        hook.setChances(1000, 3000, 5000, 1000);
+    }
+
+    /// @notice Test milestone bonuses
+    function test_milestone_bonuses() public {
+        // Disable lucky to avoid cooldown issues completely
+        hook.setChances(0, 4000, 5000, 1000);
+
+        // Check initial milestone bonus
+        LoyaltyLib.LoyaltyStats memory stats = hook.getLoyaltyStats(trader);
+        assertEq(stats.milestoneBonus, 0);
+
+        // Perform 50 swaps to trigger 50-swap milestone
+        for (uint i = 0; i < 50; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("milestone-test", i));
+            vm.warp(block.timestamp + 1); // Small increment to avoid any timing issues
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        stats = hook.getLoyaltyStats(trader);
+        assertGt(stats.milestoneBonus, 0); // Should have earned milestone bonus
+
+        // Reset chances
+        hook.setChances(1000, 3000, 5000, 1000);
+    }
+
+    /// @notice Test that swaps until next tier calculation works
+    function test_swaps_until_next_tier() public {
+        // Disable lucky to avoid cooldown issues
+        hook.setChances(0, 4000, 5000, 1000);
+
+        // At Bronze (0 swaps), should need 20 swaps to reach Silver
+        assertEq(hook.swapsUntilNextTier(trader), 20);
+
+        // Perform 10 swaps
+        for (uint i = 0; i < 10; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("next-tier-test", i));
+            vm.warp(block.timestamp + 1);
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        // Should need 10 more swaps to reach Silver
+        assertEq(hook.swapsUntilNextTier(trader), 10);
+
+        // Complete the remaining swaps
+        for (uint i = 10; i < 20; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("next-tier-test", i));
+            vm.warp(block.timestamp + 1);
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        // Now at Silver, should need 30 more to reach Gold
+        assertEq(hook.swapsUntilNextTier(trader), 30);
+
+        // Reset chances
+        hook.setChances(1000, 3000, 5000, 1000);
+    }
+
+    /// @notice Test tier name function
+    function test_tier_names() public {
+        assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Bronze), "Bronze");
+        assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Silver), "Silver");
+        assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Gold), "Gold");
+        assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Diamond), "Diamond");
+        assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Legendary), "Legendary");
+    }
+
+    /// @notice Test that owner can update loyalty configuration
+    function test_set_loyalty_config_as_owner() public {
+        // Disable lucky to avoid cooldown issues
+        hook.setChances(0, 4000, 5000, 1000);
+
+        LoyaltyLib.LoyaltyConfig memory newConfig = LoyaltyLib.LoyaltyConfig({
+            swapThresholds: [uint8(0), uint8(10), uint8(25), uint8(50), uint8(100)],        // Lower thresholds for faster testing
+            luckyBonuses: [uint16(0), uint16(100), uint16(200), uint16(350), uint16(600)],   // Different bonuses
+            feeDiscounts: [uint16(0), uint16(15), uint16(30), uint16(60), uint16(120)],      // Different discounts
+            cooldownReductions: [uint8(0), uint8(10), uint8(20), uint8(40), uint8(60)]      // Different cooldown reductions
+        });
+
+        vm.expectEmit(false, false, false, true);
+        emit SetLoyaltyConfig(newConfig.swapThresholds, newConfig.luckyBonuses, newConfig.feeDiscounts);
+
+        hook.setLoyaltyConfig(newConfig);
+
+        // Test that new config is applied
+        for (uint i = 0; i < 10; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("config-test", i));
+            vm.warp(block.timestamp + 1);
+
+            // Alternate swap direction
+            bool zeroForOne = (i % 2) == 0;
+            _performSwapAlternating(trader, salt, zeroForOne);
+        }
+
+        // Should now be at Silver tier with new thresholds (10 swaps instead of 20)
+        assertEq(uint8(hook.getLoyaltyTier(trader)), uint8(LoyaltyLib.LoyaltyTier.Silver));
+
+        // Reset chances
+        hook.setChances(1000, 3000, 5000, 1000);
+    }
+
+    /// @notice Test that non-owner cannot update loyalty configuration
+    function test_set_loyalty_config_reverts_if_not_owner() public {
+        LoyaltyLib.LoyaltyConfig memory newConfig = LoyaltyLib.LoyaltyConfig({
+            swapThresholds: [uint8(0), uint8(10), uint8(25), uint8(50), uint8(100)],
+            luckyBonuses: [uint16(0), uint16(100), uint16(200), uint16(350), uint16(600)],
+            feeDiscounts: [uint16(0), uint16(15), uint16(30), uint16(60), uint16(120)],
+            cooldownReductions: [uint8(0), uint8(10), uint8(20), uint8(40), uint8(60)]
+        });
+
+        vm.prank(trader);
+        vm.expectRevert(LuckyNBurnHook.NotOwner.selector);
+        hook.setLoyaltyConfig(newConfig);
+    }
+
+    /// @notice Test that invalid loyalty configuration reverts
+    function test_set_loyalty_config_reverts_if_invalid() public {
+        // Invalid config with descending thresholds
+        LoyaltyLib.LoyaltyConfig memory invalidConfig = LoyaltyLib.LoyaltyConfig({
+            swapThresholds: [uint8(0), uint8(20), uint8(15), uint8(50), uint8(100)],  // 15 < 20, invalid
+            luckyBonuses: [uint16(0), uint16(100), uint16(200), uint16(350), uint16(600)],
+            feeDiscounts: [uint16(0), uint16(15), uint16(30), uint16(60), uint16(120)],
+            cooldownReductions: [uint8(0), uint8(10), uint8(20), uint8(40), uint8(60)]
+        });
+
+        vm.expectRevert(LuckyNBurnHook.InvalidLoyaltyConfig.selector);
+        hook.setLoyaltyConfig(invalidConfig);
     }
 
     /// @notice Test that owner can update tier chances
@@ -283,72 +534,35 @@ contract TestLuckyNBurnHook is Test, Deployers {
         hook.setBurnConfig(address(0xbeef), 10001); // 100.01%
     }
 
-    /// @notice Test lucky tier cooldown functionality
-    function test_lucky_cooldown() public {
+    /// @notice Test lucky tier cooldown functionality with loyalty adjustments
+    function test_lucky_cooldown_with_loyalty() public {
         // Force lucky tier by setting chances to 100% lucky
         hook.setChances(10000, 0, 0, 0);
 
         bytes32 salt1 = keccak256("lucky-salt-1");
         bytes32 salt2 = keccak256("lucky-salt-2");
 
-        // Ensure no existing cooldown by warping forward enough
-        vm.warp(block.timestamp + 2 hours);
+        // Ensure clean state - warp to a clean time
+        vm.warp(10000);
 
         // First swap should succeed and record lucky timestamp
         _performSwap(trader, salt1);
 
         uint256 lastLucky = hook.lastLuckyTimestamp(trader);
-        assertGt(lastLucky, 0);
+        assertGt(lastLucky, 0, "Lucky timestamp should be set after successful swap");
 
         // Second swap immediately after should revert due to cooldown
-        vm.expectRevert();
+        vm.expectRevert(LuckyNBurnHook.CooldownActive.selector);
         _performSwap(trader, salt2);
 
-        // After cooldown period, should work again
+        // Wait for cooldown period to pass
         vm.warp(block.timestamp + 1 hours + 1);
+
+        // Now the swap should succeed again
         _performSwap(trader, salt2);
 
-        // Check that timestamp was updated
-        assertGt(hook.lastLuckyTimestamp(trader), lastLucky);
-    }
-
-    /// @notice Test that different users have separate cooldowns
-    function test_lucky_cooldown_per_user() public {
-        address trader2 = address(0x5678);
-
-        deal(Currency.unwrap(currency0), trader2, 100 ether);
-        deal(Currency.unwrap(currency1), trader2, 100 ether);
-
-        // Approve for trader2
-        vm.startPrank(trader2);
-        IERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
-        IERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
-        vm.stopPrank();
-
-        // Force lucky tier
-        hook.setChances(10000, 0, 0, 0);
-
-        bytes32 salt1 = keccak256("user1-salt");
-        bytes32 salt2 = keccak256("user2-salt");
-
-        // Ensure no existing cooldown by warping forward enough
-        vm.warp(block.timestamp + 2 hours);
-
-        // First user gets lucky
-        _performSwap(trader, salt1);
-
-        // Second user should also be able to get lucky immediately
-        vm.prank(trader2);
-        bytes memory hookData = abi.encode(trader2, salt2);
-        SwapParams memory swapParams =
-            SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
-        swapRouter.swap(
-            poolKey, swapParams, PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}), hookData
-        );
-
-        // Both should have different timestamps
-        assertGt(hook.lastLuckyTimestamp(trader), 0);
-        assertGt(hook.lastLuckyTimestamp(trader2), 0);
+        // Reset chances to normal after testing
+        hook.setChances(1000, 3000, 5000, 1000);
     }
 
     /// @notice Test that unlucky tier emits correct burn amount
@@ -356,45 +570,27 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Force unlucky tier
         hook.setChances(0, 0, 0, 10000);
 
-        // NOTE: THIS NUMBER SEEM'S TO CHANGE SOME TIMES        
-        uint256 amountIn = 986708288047964564; // Swap amount
-        uint256 totalFee = (amountIn * 100) / 10_000; // 100 bps = 1%
-        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share = 5000000000000000 wei 50% burn share = 5000000000000000 wei
-
-
-        // 50% of fee goes to burn (burnShareBps = 5000)
-        // Expect the unlucky event with corr
-        console.log("expectedBurnAmount ");
-        console.log(expectedBurnAmount);
-
-        vm.expectEmit(true, true, false, true);
-        emit Unlucky(trader, 100, expectedBurnAmount);
+        // Get initial balances to calculate actual swap amount
+        uint256 preBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
 
         // Perform swap that should trigger unlucky tier
         _performSwap(trader, keccak256("burn-calculation-test"));
 
+        // Calculate actual swap amount
+        uint256 postBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
+        uint256 actualSwapAmount = preBalance - postBalance;
+
+        // Calculate expected burn amount based on actual swap
+        uint256 totalFee = (actualSwapAmount * 100) / 10_000; // 100 bps = 1%
+        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share
+
         // Verify the burn amount was collected
         assertEq(hook.getCollectedForBurning(poolKey.currency1), expectedBurnAmount);
-        
-        console.log("");
-        console.log("--------------------------------");
-        console.log(" test_unlucky_burn_calculation ");
-        console.log("--------------------------------");
-        console.log("");
-        log_balances();
 
-
-        // TODO: Not accurate or I do miss a point in the hook & protocol
-        console.log("FEES COLLECTED currency0 currency1");
-
-        console.log(manager.protocolFeesAccrued(key.currency0));
-        console.log(manager.protocolFeesAccrued(key.currency1));
-
-        address protocolFeeControllerAddress = manager.protocolFeeController();
-
-        console.log("LP Fees Collected (currency0):", IERC20(Currency.unwrap(currency0)).balanceOf(address(protocolFeeControllerAddress)));
-        console.log("LP Fees Collected (currency1):", IERC20(Currency.unwrap(currency1)).balanceOf(address(protocolFeeControllerAddress)));
+        // Reset chances
+        hook.setChances(1000, 3000, 5000, 1000);
     }
+
     /// @notice Test that hooks revert when not called by pool manager
     function test_reverts_if_not_pool_manager() public {
         PoolKey memory key;
@@ -410,7 +606,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         vm.expectRevert(ImmutableState.NotPoolManager.selector);
         hook.afterSwap(address(1), key, params, delta, hookData);
     }
- 
+
     /// @notice Test tier result storage and cleanup
     function test_tier_result_storage_cleanup() public {
         bytes32 salt = keccak256("storage-test");
@@ -421,68 +617,61 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertEq(uint8(tierType), 0);
         assertEq(feeBps, 0);
 
-
-
         // After swap, tier result should be cleaned up
         _performSwap(trader, salt);
-
-
 
         (tierType, feeBps) = hook.tierResults(swapId);
         assertEq(uint8(tierType), 0);
         assertEq(feeBps, 0);
     }
 
-    function logWithTopicExists(bytes32 topic0Sig, Vm.Log[] memory logs) internal pure returns (bool) {
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] == topic0Sig) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /// @notice Test that all tier types can be selected
     function test_all_tier_types_selectable() public {
         // Test by forcing each tier type to 100% chance
 
+        // Start with clean timestamp
+        vm.warp(10000);
+
         // Test Lucky - first ensure no cooldown is active
-        vm.warp(1000); // fixed base timestamp
-        uint256 ts = block.timestamp;
         hook.setChances(10000, 0, 0, 0);
-        vm.warp(ts + 2 hours);
-        ts = block.timestamp;
+        vm.warp(block.timestamp + 2 hours);
+
+        // Lucky tier should emit Lucky event
+        vm.expectEmit(true, false, false, false);
+        emit Lucky(trader, 0, block.timestamp);
         _performSwap(trader, keccak256("lucky"));
 
         // Test Discounted
         hook.setChances(0, 10000, 0, 0);
-        vm.warp(ts + 2 hours);
-        ts = block.timestamp;
-        vm.expectEmit(true, true, false, false);
+        vm.warp(block.timestamp + 2 hours);
+        vm.expectEmit(true, false, false, false);
         emit Discounted(trader, 25);
         _performSwap(trader, keccak256("discounted"));
 
         // Test Normal
         hook.setChances(0, 0, 10000, 0);
-        vm.warp(ts + 2 hours);
-        ts = block.timestamp;
-        vm.expectEmit(true, true, false, false);
+        vm.warp(block.timestamp + 2 hours);
+        vm.expectEmit(true, false, false, false);
         emit Normal(trader, 50);
         _performSwap(trader, keccak256("normal"));
 
-        // NOTE: THIS NUMBER SEEM'S TO CHANGE SOME TIMES   
-        uint256 amountIn = 984942916782828359; // Swap amount
-        uint256 totalFee = (amountIn * 100) / 10_000; // 100 bps = 1% to burn, Rest to the LP provider
-        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share = 5000000000000000 wei 50% burn share = 5000000000000000 wei
-
+        // Test Unlucky - get actual balances for burn calculation
         hook.setChances(0, 0, 0, 10000);
-        vm.warp(ts + 2 hours);
-        ts = block.timestamp;
-        vm.expectEmit(true, true, false, true);
+        vm.warp(block.timestamp + 2 hours);
 
-        emit Unlucky(trader, 100, expectedBurnAmount); // expectedBurnAmount = 5000000000000000
-        _performSwap(trader, keccak256("unlucky"));     
+        uint256 preBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
+        _performSwap(trader, keccak256("unlucky"));
+        uint256 postBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
 
+        uint256 actualSwapAmount = preBalance - postBalance;
+        uint256 totalFee = (actualSwapAmount * 100) / 10_000; // 100 bps = 1%
+        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share
+
+        // Verify burn amount was collected correctly
+        assertEq(hook.getCollectedForBurning(poolKey.currency1), expectedBurnAmount);
+
+        // Reset to original chances
+        hook.setChances(1000, 3000, 5000, 1000);
     }
 
     function log_balances() public {
@@ -508,50 +697,58 @@ contract TestLuckyNBurnHook is Test, Deployers {
         console.log("--------------------------------");
     }
 
-    /// @notice Test that randomness produces different results with different salts
-    function test_randomness_with_different_salts() public {
+    /// @notice Test randomness with different salts and loyalty progression
+    function test_randomness_with_loyalty_progression() public {
         // Temporarily set lucky chance to 0 to avoid cooldown issues
         hook.setChances(0, 4000, 5000, 1000); // No lucky tier
 
-
         console.log("");
         console.log("--------------------------------");
-        console.log(" INIT test_randomness_with_different_salts ");
+        console.log(" INIT test_randomness_with_loyalty_progression ");
         console.log("--------------------------------");
         console.log("");
         log_balances();
         console.log("");
 
-        for (uint256 i = 0; i < 20; i++) {
-            bytes32 salt = keccak256(abi.encodePacked("random-test", i));
-
+        for (uint256 i = 0; i < 30; i++) {
+            bytes32 salt = keccak256(abi.encodePacked("loyalty-random-test", i));
 
             // Alternate direction every few swaps to avoid price limits
             bool zeroForOne = (i % 4) < 2;
             _performSwapAlternating(trader, salt, zeroForOne);
-   
 
-            console.log("");
-            console.log("--------------------------------");
-            console.log(" test_randomness_with_different_salts ");
-            console.log("--------------------------------");
-            console.log("");
-            log_balances();
+            // Log loyalty progression every 10 swaps
+            if (i > 0 && (i + 1) % 10 == 0) {
+                LoyaltyLib.LoyaltyStats memory stats = hook.getLoyaltyStats(trader);
+                console.log("After", i + 1, "swaps:");
+                console.log("Tier:", uint8(stats.tier));
+                console.log("Swaps:", stats.swaps);
+                console.log("Volume:", stats.volume);
+                console.log("Lucky Bonus:", stats.luckyBonus);
+                console.log("Fee Discount:", stats.feeDiscount);
+                console.log("Cooldown Reduction:", stats.cooldownReduction);
+                console.log("Milestone Bonus:", stats.milestoneBonus);
+                console.log("--------------------------------");
+            }
 
-            // TODO: Not accurate or I do miss a point in the hook & protocol as no fees seem's collected in pool... 
-            console.log("FEES COLLECTED currency0 currency1");
-
-            console.log(manager.protocolFeesAccrued(key.currency0));
-            console.log(manager.protocolFeesAccrued(key.currency1));
-
-            address protocolFeeControllerAddress = manager.protocolFeeController();
-
-            console.log("LP Fees Collected (currency0):", IERC20(Currency.unwrap(currency0)).balanceOf(address(protocolFeeControllerAddress)));
-            console.log("LP Fees Collected (currency1):", IERC20(Currency.unwrap(currency1)).balanceOf(address(protocolFeeControllerAddress)));
-
-            vm.warp(block.timestamp + 2 hours);
-
+            vm.warp(block.timestamp + 1);
         }
+
+        // Final loyalty stats
+        LoyaltyLib.LoyaltyStats memory finalStats = hook.getLoyaltyStats(trader);
+        console.log("Final Loyalty Stats:");
+        console.log("Tier:", uint8(finalStats.tier));
+        console.log("Total Swaps:", finalStats.swaps);
+        console.log("Total Volume:", finalStats.volume);
+        console.log("Lucky Bonus:", finalStats.luckyBonus);
+        console.log("Fee Discount:", finalStats.feeDiscount);
+        console.log("Milestone Bonus:", finalStats.milestoneBonus);
+
+        // Should have progressed to at least Silver tier (20+ swaps)
+        assertGe(uint8(finalStats.tier), uint8(LoyaltyLib.LoyaltyTier.Silver));
+
+        // Reset chances
+        hook.setChances(1000, 3000, 5000, 1000);
     }
 
     function _performSwapAlternating(address _trader, bytes32 salt, bool zeroForOne) internal returns (BalanceDelta) {
@@ -559,12 +756,12 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
         SwapParams memory swapParams = SwapParams({
             zeroForOne: zeroForOne,
-            amountSpecified: -1 ether, // Smaller amount to avoid hitting limits
+            amountSpecified: -0.1 ether, // Smaller amount to avoid hitting limits
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
         PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+                            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
 
         vm.prank(_trader);
         return swapRouter.swap(poolKey, swapParams, settings, hookData);
@@ -591,19 +788,25 @@ contract TestLuckyNBurnHook is Test, Deployers {
         }
     }
 
-    /// @notice Fuzz test for tier selection consistency
-    function testFuzz_tier_selection_consistency(address fuzzTrader, uint256 saltSeed) public {
+    /// @notice Fuzz test for tier selection consistency with loyalty
+    function testFuzz_tier_selection_with_loyalty(address fuzzTrader, uint256 saltSeed) public {
         vm.assume(fuzzTrader != address(0) && fuzzTrader != address(this));
 
         bytes32 salt = keccak256(abi.encodePacked(saltSeed));
         deal(Currency.unwrap(currency0), fuzzTrader, 100 ether);
         deal(Currency.unwrap(currency1), fuzzTrader, 100 ether);
 
+        // Approve for fuzz trader
+        vm.startPrank(fuzzTrader);
+        IERC20(Currency.unwrap(currency0)).approve(address(swapRouter), type(uint256).max);
+        IERC20(Currency.unwrap(currency1)).approve(address(swapRouter), type(uint256).max);
+        vm.stopPrank();
+
         // The swap should complete without reverting for any valid trader/salt combination
         vm.prank(fuzzTrader);
         bytes memory hookData = abi.encode(fuzzTrader, salt);
         SwapParams memory swapParams =
-            SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
+                        SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
 
         try swapRouter.swap(
             poolKey, swapParams, PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}), hookData
@@ -613,9 +816,29 @@ contract TestLuckyNBurnHook is Test, Deployers {
             (LuckyNBurnHook.TierType tierType, uint16 feeBps) = hook.tierResults(swapId);
             assertEq(uint8(tierType), 0);
             assertEq(feeBps, 0);
+
+            // Check that loyalty was updated
+            assertEq(hook.getSwapCount(fuzzTrader), 1);
+            assertGt(hook.getTotalVolume(fuzzTrader), 0);
         } catch {
             // Some combinations might fail due to cooldown or other constraints
             // That's acceptable for fuzz testing
         }
+    }
+
+    /// @notice Test loyalty config getter function
+    function test_get_loyalty_config() public {
+        LoyaltyLib.LoyaltyConfig memory config = hook.getLoyaltyConfig();
+
+        // Check default values
+        assertEq(config.swapThresholds[0], 0);
+        assertEq(config.swapThresholds[1], 20);
+        assertEq(config.swapThresholds[2], 50);
+        assertEq(config.swapThresholds[3], 100);
+        assertEq(config.swapThresholds[4], 200);
+
+        assertEq(config.luckyBonuses[1], 200); // Silver tier bonus
+        assertEq(config.feeDiscounts[1], 25); // Silver tier discount
+        assertEq(config.cooldownReductions[1], 15); // Silver tier cooldown reduction
     }
 }

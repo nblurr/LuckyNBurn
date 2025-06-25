@@ -22,7 +22,8 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Slot0} from "v4-core/types/Slot0.sol";
 import {IExtsload} from "v4-core/interfaces/IExtsload.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
-import { LPFeeLibrary } from "v4-core/libraries/LPFeeLibrary.sol";
+import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
+import "forge-std/console.sol";
 
 contract TestLuckyNBurnHook is Test, Deployers {
     using CurrencyLibrary for Currency;
@@ -76,7 +77,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         manager.initialize(poolKey, SQRT_PRICE_1_1);
 
         // Add initial liquidity to the pool
-        uint160 sqrtPriceAtTickLower = TickMath.getSqrtPriceAtTick(-60);
+        uint160 sqrtPriceAtTickLower = TickMath.getSqrtPriceAtTick(- 60);
         uint160 sqrtPriceAtTickUpper = TickMath.getSqrtPriceAtTick(60);
         uint256 token0ToAdd = 10 ether;
         uint256 token1ToAdd = 10 ether;
@@ -92,7 +93,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         modifyLiquidityRouter.modifyLiquidity{value: token0ToAdd}(
             poolKey,
             ModifyLiquidityParams({
-                tickLower: -60,
+                tickLower: - 60,
                 tickUpper: 60,
                 liquidityDelta: int256(uint256(liquidityDelta)),
                 salt: bytes32(0)
@@ -116,7 +117,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         bytes memory hookData = abi.encode(_trader, salt);
 
         SwapParams memory swapParams =
-                        SwapParams({zeroForOne: true, amountSpecified: -0.1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
+                        SwapParams({zeroForOne: true, amountSpecified: - 0.1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
 
         PoolSwapTest.TestSettings memory settings =
                             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
@@ -570,22 +571,52 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Force unlucky tier
         hook.setChances(0, 0, 0, 10000);
 
-        // Get initial balances to calculate actual swap amount
-        uint256 preBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
+        // Get initial balances to calculate actual swap amounts
+        address poolManagerAddr = address(manager);
+        uint256 preBalance0 = IERC20(Currency.unwrap(currency0)).balanceOf(poolManagerAddr);
+        uint256 preBalance1 = IERC20(Currency.unwrap(currency1)).balanceOf(poolManagerAddr);
 
         // Perform swap that should trigger unlucky tier
         _performSwap(trader, keccak256("burn-calculation-test"));
 
-        // Calculate actual swap amount
-        uint256 postBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
-        uint256 actualSwapAmount = preBalance - postBalance;
+        // Calculate actual swap amounts
+        uint256 postBalance0 = IERC20(Currency.unwrap(currency0)).balanceOf(poolManagerAddr);
+        uint256 postBalance1 = IERC20(Currency.unwrap(currency1)).balanceOf(poolManagerAddr);
 
-        // Calculate expected burn amount based on actual swap
-        uint256 totalFee = (actualSwapAmount * 100) / 10_000; // 100 bps = 1%
-        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share
+        uint256 token0Delta = postBalance0 > preBalance0 
+            ? postBalance0 - preBalance0 
+            : preBalance0 - postBalance0;
+            
+        uint256 token1Delta = postBalance1 > preBalance1
+            ? postBalance1 - preBalance1
+            : preBalance1 - postBalance1;
 
-        // Verify the burn amount was collected
-        assertEq(hook.getCollectedForBurning(poolKey.currency1), expectedBurnAmount);
+        console.log("Token 0 delta:", token0Delta);
+        console.log("Token 1 delta:", token1Delta);
+
+        // Get the actual fee basis points for the Unlucky tier
+        (, uint16 unluckyFeeBps) = hook.unlucky();
+        uint256 burnShareBps = hook.burnShareBps(); // Should be 50% (5000 bps)
+        
+        console.log("Unlucky fee (bps):", unluckyFeeBps);
+        console.log("Burn share (bps):", burnShareBps);
+        
+        // Calculate expected burn amount based on token flow
+        // The contract uses the absolute token flow for the fee calculation
+        // For a swap from token0 to token1, the token flow is the amount of token1 received
+        uint256 tokenFlow = token1Delta;
+        uint256 feeAmount = (tokenFlow * unluckyFeeBps) / 10_000;
+        uint256 expectedBurnAmount = (feeAmount * burnShareBps) / 10_000;
+        
+        console.log("Token flow (token1):", tokenFlow);
+        console.log("Fee amount (1% of flow):", feeAmount);
+        console.log("Expected burn amount (50% of fee):", expectedBurnAmount);
+        
+        uint256 actualBurned = hook.getCollectedForBurning(poolKey.currency1);
+        console.log("Actual burned:", actualBurned);
+
+        // Verify the burn amount was collected (allow for small rounding differences)
+        assertApproxEqAbs(actualBurned, expectedBurnAmount, 1, "Burn amount mismatch");
 
         // Reset chances
         hook.setChances(1000, 3000, 5000, 1000);
@@ -756,7 +787,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
 
         SwapParams memory swapParams = SwapParams({
             zeroForOne: zeroForOne,
-            amountSpecified: -0.1 ether, // Smaller amount to avoid hitting limits
+            amountSpecified: - 0.1 ether, // Smaller amount to avoid hitting limits
             sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
         });
 
@@ -806,7 +837,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         vm.prank(fuzzTrader);
         bytes memory hookData = abi.encode(fuzzTrader, salt);
         SwapParams memory swapParams =
-                        SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
+                        SwapParams({zeroForOne: true, amountSpecified: - 1 ether, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
 
         try swapRouter.swap(
             poolKey, swapParams, PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}), hookData

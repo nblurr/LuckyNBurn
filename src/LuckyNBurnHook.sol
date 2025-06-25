@@ -325,10 +325,15 @@ contract LuckyNBurnHook is BaseHook {
         // End goal, only burn some token1 no matter the params.zeroForOne value
         if (result.tierType == TierType.Unlucky) {
             uint256 burnAmount = 0;
-
-            uint256 absTokenFlow = uint256(tokenDelta > 0 ? tokenDelta : -tokenDelta);
-            uint256 feeAmount = (absTokenFlow * result.feeBps) / 10_000; // Always burn the base fee
-            burnAmount = (feeAmount * burnShareBps) / 10_000;
+            
+            // Calculate fee and burn amounts safely
+            uint256 absTokenFlow = tokenDelta > 0 ? uint256(tokenDelta) : uint256(-tokenDelta);
+            uint256 feeAmount = (absTokenFlow * result.feeBps) / 10_000;
+            
+            // Only calculate burn amount if we have a positive fee
+            if (feeAmount > 0 && burnShareBps > 0) {
+                burnAmount = (feeAmount * burnShareBps) / 10_000;
+            }
 
             Currency burnCurrency = params.zeroForOne ? key.currency1 : key.currency0;
 

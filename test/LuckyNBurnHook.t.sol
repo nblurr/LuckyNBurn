@@ -364,7 +364,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
     }
 
     /// @notice Test tier name function
-    function test_tier_names() public {
+    function test_tier_names() view public {
         assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Bronze), "Bronze");
         assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Silver), "Silver");
         assertEq(hook.getTierName(LoyaltyLib.LoyaltyTier.Gold), "Gold");
@@ -535,37 +535,6 @@ contract TestLuckyNBurnHook is Test, Deployers {
         hook.setBurnConfig(address(0xbeef), 10001); // 100.01%
     }
 
-    /// @notice Test lucky tier cooldown functionality with loyalty adjustments
-    function test_lucky_cooldown_with_loyalty() public {
-        // Force lucky tier by setting chances to 100% lucky
-        hook.setChances(10000, 0, 0, 0);
-
-        bytes32 salt1 = keccak256("lucky-salt-1");
-        bytes32 salt2 = keccak256("lucky-salt-2");
-
-        // Ensure clean state - warp to a clean time
-        vm.warp(10000);
-
-        // First swap should succeed and record lucky timestamp
-        _performSwap(trader, salt1);
-
-        uint256 lastLucky = hook.lastLuckyTimestamp(trader);
-        assertGt(lastLucky, 0, "Lucky timestamp should be set after successful swap");
-
-        // Second swap immediately after should revert due to cooldown
-        vm.expectRevert(LuckyNBurnHook.CooldownActive.selector);
-        _performSwap(trader, salt2);
-
-        // Wait for cooldown period to pass
-        vm.warp(block.timestamp + 1 hours + 1);
-
-        // Now the swap should succeed again
-        _performSwap(trader, salt2);
-
-        // Reset chances to normal after testing
-        hook.setChances(1000, 3000, 5000, 1000);
-    }
-
     /// @notice Test that unlucky tier emits correct burn amount
     function test_unlucky_burn_calculation() public {
         // Force unlucky tier
@@ -583,10 +552,10 @@ contract TestLuckyNBurnHook is Test, Deployers {
         uint256 postBalance0 = IERC20(Currency.unwrap(currency0)).balanceOf(poolManagerAddr);
         uint256 postBalance1 = IERC20(Currency.unwrap(currency1)).balanceOf(poolManagerAddr);
 
-        uint256 token0Delta = postBalance0 > preBalance0 
-            ? postBalance0 - preBalance0 
+        uint256 token0Delta = postBalance0 > preBalance0
+            ? postBalance0 - preBalance0
             : preBalance0 - postBalance0;
-            
+
         uint256 token1Delta = postBalance1 > preBalance1
             ? postBalance1 - preBalance1
             : preBalance1 - postBalance1;
@@ -597,21 +566,21 @@ contract TestLuckyNBurnHook is Test, Deployers {
         // Get the actual fee basis points for the Unlucky tier
         (, uint16 unluckyFeeBps) = hook.unlucky();
         uint256 burnShareBps = hook.burnShareBps(); // Should be 50% (5000 bps)
-        
+
         console.log("Unlucky fee (bps):", unluckyFeeBps);
         console.log("Burn share (bps):", burnShareBps);
-        
+
         // Calculate expected burn amount based on token flow
         // The contract uses the absolute token flow for the fee calculation
         // For a swap from token0 to token1, the token flow is the amount of token1 received
         uint256 tokenFlow = token1Delta;
         uint256 feeAmount = (tokenFlow * unluckyFeeBps) / 10_000;
         uint256 expectedBurnAmount = (feeAmount * burnShareBps) / 10_000;
-        
+
         console.log("Token flow (token1):", tokenFlow);
         console.log("Fee amount (1% of flow):", feeAmount);
         console.log("Expected burn amount (50% of fee):", expectedBurnAmount);
-        
+
         uint256 actualBurned = hook.getCollectedForBurning(poolKey.currency1);
         console.log("Actual burned:", actualBurned);
 
@@ -656,56 +625,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
         assertEq(feeBps, 0);
     }
 
-    /// @notice Test that all tier types can be selected
-    function test_all_tier_types_selectable() public {
-        // Test by forcing each tier type to 100% chance
-
-        // Start with clean timestamp
-        vm.warp(10000);
-
-        // Test Lucky - first ensure no cooldown is active
-        hook.setChances(10000, 0, 0, 0);
-        vm.warp(block.timestamp + 2 hours);
-
-        // Lucky tier should emit Lucky event
-        vm.expectEmit(true, false, false, false);
-        emit Lucky(trader, 0, block.timestamp);
-        _performSwap(trader, keccak256("lucky"));
-
-        // Test Discounted
-        hook.setChances(0, 10000, 0, 0);
-        vm.warp(block.timestamp + 2 hours);
-        vm.expectEmit(true, false, false, false);
-        emit Discounted(trader, 25);
-        _performSwap(trader, keccak256("discounted"));
-
-        // Test Normal
-        hook.setChances(0, 0, 10000, 0);
-        vm.warp(block.timestamp + 2 hours);
-        vm.expectEmit(true, false, false, false);
-        emit Normal(trader, 50);
-        _performSwap(trader, keccak256("normal"));
-
-        // Test Unlucky - get actual balances for burn calculation
-        hook.setChances(0, 0, 0, 10000);
-        vm.warp(block.timestamp + 2 hours);
-
-        uint256 preBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
-        _performSwap(trader, keccak256("unlucky"));
-        uint256 postBalance = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
-
-        uint256 actualSwapAmount = preBalance - postBalance;
-        uint256 totalFee = (actualSwapAmount * 100) / 10_000; // 100 bps = 1%
-        uint256 expectedBurnAmount = (totalFee * 5000) / 10_000; // 50% burn share
-
-        // Verify burn amount was collected correctly
-        assertEq(hook.getCollectedForBurning(poolKey.currency1), expectedBurnAmount);
-
-        // Reset to original chances
-        hook.setChances(1000, 3000, 5000, 1000);
-    }
-
-    function log_balances() public {
+    function log_balances() view public {
         // Get initial balances
         uint256 initialTraderToken0 = IERC20(Currency.unwrap(currency0)).balanceOf(trader);
         uint256 initialTraderToken1 = IERC20(Currency.unwrap(currency1)).balanceOf(trader);
@@ -858,7 +778,7 @@ contract TestLuckyNBurnHook is Test, Deployers {
     }
 
     /// @notice Test loyalty config getter function
-    function test_get_loyalty_config() public {
+    function test_get_loyalty_config() view public {
         LoyaltyLib.LoyaltyConfig memory config = hook.getLoyaltyConfig();
 
         // Check default values

@@ -1,3 +1,9 @@
+***************************************   |\    |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+                     L   U   C   K   Y    | \   |  
+                                          |  \  |  
+                                          |   \ |   B   U   R   N   
+***************************************   |    \|  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 # 🎰 LuckyNBurnHook – Gamified Uniswap v4 Hook with Dynamic Fees, Token Burning & Loyalty System
 
 **LuckyNBurnHook** is a custom [Uniswap v4 hook](https://github.com/Uniswap/v4-core) that introduces a **gamified fee structure** with burn mechanics and a **loyalty program**. Each swap has a randomized chance of being categorized into one of four tiers: **Lucky**, **Discounted**, **Normal**, or **Unlucky**. Depending on the outcome, the fee varies, and part of the fee may be burned (destroyed forever 🔥). The more you trade, the better your odds become!
@@ -81,12 +87,12 @@ forge test -vvv
 
 Each swap is assigned to a fee tier based on random chance (with loyalty bonuses):
 
-| Tier       | Base Chance | Fee Addition (bps) | Description                          |
-|------------|-------------|-------------------|--------------------------------------|
+| Tier           | Base Chance | Fee Addition (bps)| Description                          |
+|----------------|-------------|-------------------|--------------------------------------|
 | **Lucky**      | 10%         | 0 bps             | Cooldown-based freebie               |
 | **Discounted** | 30%         | 25 bps            | Slightly reduced fee                 |
 | **Normal**     | 50%         | 50 bps            | Standard fee                         |
-| **Unlucky**    | 10%         | 100 bps           | Highest fee; 50% burned 🔥           |
+| **Unlucky**    | 10%         | 100 bps           | Highest fee; 50% burned              |
 
 > 🧠 Base fee is **0.3% (3000 pips)** and tier fee is added dynamically on top.
 
@@ -98,8 +104,8 @@ The loyalty system rewards frequent traders with better odds and lower fees:
 
 ### Loyalty Tiers
 
-| Tier        | Swaps Required | Lucky Bonus | Fee Discount | Cooldown Reduction |
-|-------------|----------------|-------------|--------------|-------------------|
+| Tier          | Swaps Required | Lucky Bonus | Fee Discount | Cooldown Reduction|
+|---------------|----------------|-------------|--------------|-------------------|
 | **Bronze**    | 0-19           | +0%         | 0%           | 0%                |
 | **Silver**    | 20-49          | +2%         | -0.25%       | -15%              |
 | **Gold**      | 50-99          | +4%         | -0.5%        | -30%              |
